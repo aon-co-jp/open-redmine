@@ -234,15 +234,24 @@ fn wire_ticket_form() {
             let title = input_value("new-ticket-title");
             let description = textarea_value("new-ticket-description");
             let tracker = select_value("new-ticket-tracker");
+            let assignee = input_value("new-ticket-assignee");
             if title.trim().is_empty() {
                 return;
             }
-            let body = serde_json::json!({ "title": title, "description": description, "project_id": project_id, "tracker": tracker }).to_string();
+            let mut body_json = serde_json::json!({ "title": title, "description": description, "project_id": project_id, "tracker": tracker });
+            // 担当者は任意入力(空欄なら送らない、サーバー側の`Option<String>`
+            // 既定〈未割当〉のまま——空文字列を"登録済みメールアドレスでは
+            // ない"として400にしないため)。
+            if !assignee.trim().is_empty() {
+                body_json["assignee"] = serde_json::Value::String(assignee);
+            }
+            let body = body_json.to_string();
             match api("POST", "/api/tickets", Some(body)).await {
                 Ok((201, _)) => {
                     set_text("ticket-status", "");
                     set_input_value("new-ticket-title", "");
                     set_textarea_value("new-ticket-description", "");
+                    set_input_value("new-ticket-assignee", "");
                     load_tickets(project_id).await;
                 }
                 Ok((status, msg)) => set_text("ticket-status", &format!("エラー({status}): {msg}")),
@@ -265,6 +274,28 @@ fn wire_ticket_detail() {
             match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
                 Ok((200, _)) => open_ticket(ticket_id),
                 Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("更新エラー({status_code}): {msg}")),
+                Err(_) => set_text("ticket-detail-status", "通信エラーが発生しました。"),
+            }
+        });
+    });
+
+    add_click("update-assignee-btn", || {
+        wasm_bindgen_futures::spawn_local(async {
+            let ticket_id = current_ticket_id();
+            if ticket_id == 0 {
+                return;
+            }
+            let assignee = input_value("new-assignee-input");
+            if assignee.trim().is_empty() {
+                return;
+            }
+            let body = serde_json::json!({ "assignee": assignee }).to_string();
+            match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
+                Ok((200, _)) => {
+                    set_input_value("new-assignee-input", "");
+                    open_ticket(ticket_id);
+                }
+                Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("担当者更新エラー({status_code}): {msg}")),
                 Err(_) => set_text("ticket-detail-status", "通信エラーが発生しました。"),
             }
         });
@@ -450,8 +481,12 @@ async fn load_tickets(project_id: u64) {
         let title = escape_html(t.get("title").and_then(|v| v.as_str()).unwrap_or(""));
         let status = escape_html(t.get("status").and_then(|v| v.as_str()).unwrap_or(""));
         let tracker = escape_html(t.get("tracker").and_then(|v| v.as_str()).unwrap_or("bug"));
+        let assignee_badge = match t.get("assignee").and_then(|v| v.as_str()) {
+            Some(a) => format!(r#" <span class="badge">{}</span>"#, escape_html(a)),
+            None => String::new(),
+        };
         html.push_str(&format!(
-            r#"<li><button class="link-btn" onclick="open_ticket({id})">{title}</button> <span class="badge">{tracker}</span> <span class="badge">{status}</span></li>"#
+            r#"<li><button class="link-btn" onclick="open_ticket({id})">{title}</button> <span class="badge">{tracker}</span> <span class="badge">{status}</span>{assignee_badge}</li>"#
         ));
     }
     if html.is_empty() {
@@ -476,8 +511,10 @@ pub fn open_ticket(ticket_id: u64) {
         let description = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
         let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("open");
         let tracker = t.get("tracker").and_then(|v| v.as_str()).unwrap_or("bug");
+        let assignee = t.get("assignee").and_then(|v| v.as_str());
         set_text("ticket-detail-title", title);
         set_text("ticket-detail-tracker", tracker);
+        set_text("ticket-detail-assignee", assignee.unwrap_or("unassigned (未割当)"));
         set_text("ticket-detail-description", description);
         if let Ok(select) = by_id("ticket-status-select").dyn_into::<HtmlSelectElement>() {
             select.set_value(status);
