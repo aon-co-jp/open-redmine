@@ -321,6 +321,14 @@ struct Ticket {
     /// 進捗率(0-100)。範囲外の値はハンドラ側で`400`として拒否する。
     #[serde(default)]
     done_ratio: u8,
+    /// 担当者(Redmine機能ギャップ対応、2026-07-27追加)。登録済みメール
+    /// アドレス(`accounts::AccountStore::emails`)または管理者メール
+    /// アドレスのいずれかでなければならず、ハンドラ側で`400`として拒否
+    /// する(`assignee_email_is_valid`参照)。プロジェクトメンバーシップ
+    /// という概念自体はまだ存在しない(`project.rs`参照)ため、
+    /// 「登録済みアカウントかどうか」までを検証範囲とする——正直な開示。
+    #[serde(default)]
+    assignee: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -359,10 +367,18 @@ struct CreateTicketRequest {
     due_date: Option<String>,
     #[serde(default)]
     done_ratio: Option<u8>,
+    #[serde(default)]
+    assignee: Option<String>,
 }
 
 fn done_ratio_out_of_range(ratio: u8) -> bool {
     ratio > 100
+}
+
+/// `email`が担当者として指定可能かどうか(管理者メールアドレス、または
+/// `accounts::AccountStore`に登録済みのメールアドレスのいずれか)。
+fn assignee_email_is_valid(email: &str, accounts: &accounts::AccountStore, admin_email: &str) -> bool {
+    email == admin_email || accounts.emails.contains(email)
 }
 
 /// `POST /api/tickets` — チケットを新規作成する。所属`project_id`への
@@ -382,6 +398,12 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
     if done_ratio_out_of_range(done_ratio) {
         return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("done_ratio must be between 0 and 100"));
     }
+    if let Some(assignee) = &body.assignee {
+        let accounts = accounts::load(&state.data_root, state.backend.as_ref()).await;
+        if !assignee_email_is_valid(assignee, &accounts, &state.admin_email) {
+            return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("assignee must be a registered account email"));
+        }
+    }
     let mut store = load_tickets(&state.data_root).await;
     let id = store.next_id;
     store.next_id += 1;
@@ -395,6 +417,7 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
         start_date: body.start_date.clone(),
         due_date: body.due_date.clone(),
         done_ratio,
+        assignee: body.assignee.clone(),
     };
     store.tickets.push(ticket.clone());
     save_tickets(&state.data_root, &store)
@@ -410,9 +433,10 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
 /// `Need::View`権限がある場合のみ結果に含める(管理者は全件、
 /// 未ログインは基本的に空配列——`RGit`と同じprivate既定の考え方)。
 /// クエリパラメータ`status`(`open`/`in_progress`/`closed`)・
-/// `project_id`(数値)で絞り込み可能(Redmine機能ギャップ対応、
-/// 2026-07-23追加——`assignee`はチケットに担当者フィールド自体が
-/// まだ存在しないため今回はスコープ外、正直な開示)。
+/// `project_id`(数値)・`tracker`(`bug`/`feature`/`support`/`task`)・
+/// `assignee`(メールアドレス完全一致)で絞り込み可能(Redmine機能ギャップ
+/// 対応、2026-07-23追加。`assignee`は2026-07-27にチケットへ担当者
+/// フィールドを追加した際にあわせて対応)。
 #[handler]
 async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Response> {
     let email = session_email(req, &state);
@@ -448,6 +472,7 @@ async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Respo
         "task" => Some(Tracker::Task),
         _ => None,
     });
+    let assignee_filter: Option<&String> = query.get("assignee");
     let store = load_tickets(&state.data_root).await;
     let mut visible = Vec::new();
     for ticket in &store.tickets {
@@ -464,6 +489,11 @@ async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Respo
         }
         if let Some(want) = tracker_filter {
             if ticket.tracker != want {
+                continue;
+            }
+        }
+        if let Some(want) = assignee_filter {
+            if ticket.assignee.as_deref() != Some(want.as_str()) {
                 continue;
             }
         }
@@ -507,6 +537,8 @@ struct UpdateTicketRequest {
     due_date: Option<String>,
     #[serde(default)]
     done_ratio: Option<u8>,
+    #[serde(default)]
+    assignee: Option<String>,
 }
 
 /// `PUT /api/tickets/:id` — チケットのタイトル・説明・ステータスを更新する
@@ -523,6 +555,12 @@ async fn update_ticket(
         return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
     };
     check_project_access(req, &state, existing.project_id, access::Need::Edit).await?;
+    if let Some(assignee) = &body.assignee {
+        let accounts = accounts::load(&state.data_root, state.backend.as_ref()).await;
+        if !assignee_email_is_valid(assignee, &accounts, &state.admin_email) {
+            return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("assignee must be a registered account email"));
+        }
+    }
     let mut store = store_preview;
     let Some(ticket) = store.tickets.iter_mut().find(|t| t.id == id) else {
         return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
@@ -550,6 +588,9 @@ async fn update_ticket(
     }
     if let Some(due_date) = &body.due_date {
         ticket.due_date = Some(due_date.clone());
+    }
+    if let Some(assignee) = &body.assignee {
+        ticket.assignee = Some(assignee.clone());
     }
     let updated = ticket.clone();
     save_tickets(&state.data_root, &store)
@@ -2175,6 +2216,97 @@ mod handler_tests {
         updated.assert_status_is_ok();
         let updated_body: serde_json::Value = updated.json().await.value().deserialize();
         assert_eq!(updated_body["tracker"].as_str().unwrap(), "support");
+    }
+
+    /// 担当者(assignee)フィールドのライフサイクル: 未登録メールアドレス
+    /// を指定した作成・更新はいずれも400、登録済みアカウント
+    /// (管理者以外)を指定した作成は成功、`assignee`クエリでの絞り込み、
+    /// PUTでの担当者変更、を一気通貫で確認する(2026-07-27追加)。
+    #[tokio::test]
+    async fn ticket_assignee_must_be_a_registered_account_and_is_filterable() {
+        let state = make_state("ticket-assignee", false).await;
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "assignee-proj" }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 未登録メールアドレスをassigneeに指定した作成は400。
+        let rejected = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "t", "description": "d", "project_id": project_id, "assignee": "nobody@example.com" }))
+            .send()
+            .await;
+        rejected.assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // 管理者メールアドレスは常に有効な担当者として指定できる。
+        let admin_assigned = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "assigned to admin", "description": "d", "project_id": project_id, "assignee": ADMIN_EMAIL }))
+            .send()
+            .await;
+        admin_assigned.assert_status(poem::http::StatusCode::CREATED);
+        let admin_assigned_body: serde_json::Value = admin_assigned.json().await.value().deserialize();
+        assert_eq!(admin_assigned_body["assignee"].as_str().unwrap(), ADMIN_EMAIL);
+
+        // 一般アカウントを登録した上で、そのメールアドレスを担当者に
+        // 指定した作成が成功すること。
+        let dev_email = "dev@example.com";
+        let register = client
+            .post("/api/accounts")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "email": dev_email }))
+            .send()
+            .await;
+        register.assert_status(poem::http::StatusCode::CREATED);
+
+        let dev_assigned = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "assigned to dev", "description": "d", "project_id": project_id, "assignee": dev_email }))
+            .send()
+            .await;
+        dev_assigned.assert_status(poem::http::StatusCode::CREATED);
+        let dev_assigned_body: serde_json::Value = dev_assigned.json().await.value().deserialize();
+        let dev_ticket_id = dev_assigned_body["id"].as_u64().unwrap();
+        assert_eq!(dev_assigned_body["assignee"].as_str().unwrap(), dev_email);
+
+        // assignee=dev@example.comで絞り込むと1件のみ。
+        let filtered = client.get(format!("/api/tickets?assignee={dev_email}")).header("Authorization", format!("Bearer {admin}")).send().await;
+        filtered.assert_status_is_ok();
+        let filtered_body: serde_json::Value = filtered.json().await.value().deserialize();
+        let filtered_array = filtered_body.as_array().unwrap();
+        assert_eq!(filtered_array.len(), 1);
+        assert_eq!(filtered_array[0]["id"].as_u64().unwrap(), dev_ticket_id);
+
+        // PUTで未登録メールアドレスへの担当者変更を試みると400。
+        let reject_update = client
+            .put(format!("/api/tickets/{dev_ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "assignee": "still-nobody@example.com" }))
+            .send()
+            .await;
+        reject_update.assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // PUTで管理者へ担当者を付け替えると成功する。
+        let update = client
+            .put(format!("/api/tickets/{dev_ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "assignee": ADMIN_EMAIL }))
+            .send()
+            .await;
+        update.assert_status_is_ok();
+        let update_body: serde_json::Value = update.json().await.value().deserialize();
+        assert_eq!(update_body["assignee"].as_str().unwrap(), ADMIN_EMAIL);
     }
 
     /// 課題関連(`blocks`/`duplicates`/`precedes`)のライフサイクル: 作成・

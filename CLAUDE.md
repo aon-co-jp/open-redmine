@@ -81,6 +81,39 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
 
 ## HANDOFF
 
+- **2026-07-27 チケットに担当者(assignee)フィールドを追加——直前
+  エントリの「次にすべきこと(2) 担当者(assignee)フィールド追加」に対応
+  (ユーザー指示: SETリポジトリ群〈open-directx/open-cuda/aruaru-llm〉の
+  連携強化と並行してopen-redmineの開発を進める)**:
+  1. **`Ticket`/`CreateTicketRequest`/`UpdateTicketRequest`に
+     `assignee: Option<String>`を追加**。プロジェクトメンバーシップという
+     概念自体はまだ存在しない(`project.rs`にメンバー一覧の仕組みが無い)
+     ため、検証範囲は「登録済みアカウント(`accounts::AccountStore::
+     emails`)または管理者メールアドレスのいずれかであること」に限定した
+     (`assignee_email_is_valid`関数、正直な開示——Redmine本家の
+     「プロジェクトメンバーのみ割り当て可能」までは再現していない)。
+     不正な値は`create_ticket`/`update_ticket`いずれも`400`で拒否。
+  2. **`GET /api/tickets`に`assignee`クエリパラメータを追加**(既存の
+     `status`/`project_id`/`tracker`と同じ完全一致フィルタパターン)。
+  3. **新規テスト`ticket_assignee_must_be_a_registered_account_and_is_filterable`
+     を追加**: 未登録メールアドレスでの作成・更新がいずれも400になる
+     こと、管理者メールアドレスは常に有効な担当者として指定できること、
+     一般アカウントを登録した上でそのメールアドレスを担当者に指定した
+     作成・`assignee`クエリでの絞り込み・PUTでの担当者付け替えが実際に
+     動作することを、`poem::test::TestClient`経由の実HTTPリクエストで
+     一気通貫に確認した。
+  4. **検証(実測)**: `cargo build`警告10件(いずれも既存のdead-code系、
+     今回の変更による新規警告なし)。`cargo test`**66→67件、全green**。
+     実バイナリ(`target/debug/rs-chiketto.exe`)を実際に起動し、
+     `curl`で`/healthz`(200)・`/api/tickets`(200、`[]`)への到達を確認
+     (型チェック・ユニットテストのみで完了と報告しない方針の徹底)。
+  - 次にすべきこと: (1) `web/`側UI(WASM GUI)にチケット作成・編集フォームの
+    担当者選択欄を追加(現状HTTP API止まり)、(2) プロジェクトメンバー
+    シップという概念自体の導入(現状は「登録済みアカウント全体」までしか
+    検証できておらず、Redmine本家の「プロジェクトメンバーのみ」制約には
+    未対応)、(3) ロール権限管理の細分化(閲覧/編集の2値→管理者/開発者/
+    報告者等)。
+
 - **2026-07-26 Redmine実機能に基づく本家調査+トラッカー種別・課題関連・
   作業時間記録の3増分を実装(ユーザー指示「redmineの公式ドキュメント
   https://www.redmine.org/ これとそっくりにお願い これをRust+RPoemで
