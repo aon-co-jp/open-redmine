@@ -79,6 +79,34 @@ fn session_email(req: &Request, state: &AppState) -> Option<String> {
     state.auth.session_email(token)
 }
 
+/// グローバル管理者、または`project_id`に対する
+/// `access::Need::ManageMembers`許可を持つアカウントのみを通す
+/// (ロール権限管理の細分化、2026-07-27追加——Redmine本家の
+/// 「プロジェクトマネージャーロール」相当、`decide_access_request`で使用)。
+/// `project_id`が指定されていない申請(プロジェクト非紐付けのアカウント
+/// 登録のみの申請)はスコープを判定できないため、管理者のみに限定する。
+/// 成功時は実際に許可されたアカウントのメールアドレスを返す(呼び出し側が
+/// 「このメールアドレスはグローバル管理者本人か」を追加判定できるように
+/// するため)。
+async fn require_admin_or_project_manager(req: &Request, state: &AppState, project_id: Option<u64>) -> PoemResult<String> {
+    let email = session_email(req, state);
+    if let Some(email) = &email {
+        if *email == state.admin_email {
+            return Ok(email.clone());
+        }
+        if let Some(pid) = project_id {
+            let config = access::load(&state.data_root, pid, state.backend.as_ref()).await;
+            if access::is_allowed(&config, access::Need::ManageMembers, Some(email.as_str())) {
+                return Ok(email.clone());
+            }
+        }
+    }
+    match email {
+        Some(_) => Err(poem::Error::from_string("insufficient permission", poem::http::StatusCode::FORBIDDEN)),
+        None => Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED)),
+    }
+}
+
 /// チケットが所属する`project`に対して`need`の操作が許可されているかを
 /// 判定する(`access.rs`の`is_allowed`を利用)。管理者は常に許可。
 /// 未ログインは`401`、ログイン済みだが権限不足は`403`
@@ -1256,14 +1284,29 @@ struct DecideAccessRequestPayload {
     allow_view: bool,
     #[serde(default)]
     allow_edit: bool,
+    /// このプロジェクトのメンバー管理権限も付与するか(2026-07-27追加)。
+    /// グローバル管理者以外(プロジェクトマネージャー)が審査する場合、
+    /// このフィールドが`true`だと権限昇格になるため`403`で拒否する
+    /// (`decide_access_request`参照)。
+    #[serde(default)]
+    allow_manage_members: bool,
     #[serde(default)]
     project_id: Option<u64>,
 }
 
-/// `POST /api/accounts/requests/:id/decide` — 申請を審査する(管理者のみ)。
+/// `POST /api/accounts/requests/:id/decide` — 申請を審査する。
+/// グローバル管理者に加え、`project_id`が指定されている場合はその
+/// プロジェクトの`allow_manage_members`権限を持つアカウント(プロジェクト
+/// マネージャー)も審査できる(ロール権限管理の細分化、2026-07-27追加、
+/// Redmine本家の「プロジェクトマネージャーロール」相当)。
 /// 承認時、`project_id`が指定されていればそのプロジェクトの
 /// `access::AccessConfig::accounts`に閲覧/編集許可を書き込む
-/// (プロジェクト指定が無い申請はアカウント登録のみ行う)。
+/// (プロジェクト指定が無い申請はアカウント登録のみ行う、この場合は
+/// スコープを判定できないため引き続き管理者のみ)。
+/// **権限昇格の防止**: プロジェクトマネージャー(グローバル管理者では
+/// ない審査者)は`allow_manage_members: true`を新規に付与することは
+/// できない(`403`)——メンバー管理権限自体の付与はグローバル管理者のみに
+/// 限定する。
 /// `accounts_locked`中は管理者メール以外の承認を拒否する
 /// (`RGit`の`RGIT_ACCOUNTS_LOCKED`と同じ方針)。
 #[handler]
@@ -1273,7 +1316,13 @@ async fn decide_access_request(
     state: Data<&AppState>,
     body: poem::web::Json<DecideAccessRequestPayload>,
 ) -> PoemResult<Response> {
-    require_admin_session(req, &state)?;
+    let acting_email = require_admin_or_project_manager(req, &state, body.project_id).await?;
+    let acting_is_global_admin = acting_email == state.admin_email;
+    if body.approve && body.allow_manage_members && !acting_is_global_admin {
+        return Ok(Response::builder()
+            .status(poem::http::StatusCode::FORBIDDEN)
+            .body("only the administrator can grant member-management permission"));
+    }
     let mut store = accounts::load(&state.data_root, state.backend.as_ref()).await;
     let Some(pos) = store.pending_requests.iter().position(|r| r.id == id) else {
         return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("request not found"));
@@ -1299,7 +1348,10 @@ async fn decide_access_request(
     if body.approve {
         if let Some(pid) = body.project_id {
             let mut config = access::load(&state.data_root, pid, state.backend.as_ref()).await;
-            config.accounts.insert(request.email.clone(), access::AccountPermission { allow_view: body.allow_view, allow_edit: body.allow_edit });
+            config.accounts.insert(
+                request.email.clone(),
+                access::AccountPermission { allow_view: body.allow_view, allow_edit: body.allow_edit, allow_manage_members: body.allow_manage_members },
+            );
             access::save(&state.data_root, pid, &config, state.backend.as_ref())
                 .await
                 .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
@@ -1518,6 +1570,76 @@ mod handler_tests {
         assert!(!perm.allow_edit);
     }
 
+    /// ロール権限管理の細分化(2026-07-27追加): グローバル管理者ではない
+    /// 「プロジェクトマネージャー」(`allow_manage_members: true`を持つ
+    /// アカウント)が、自分の管理するプロジェクト宛の申請を審査できる
+    /// こと、他プロジェクト宛の申請は審査できないこと(403)、
+    /// `allow_manage_members: true`自体を新規に付与しようとすると
+    /// 権限昇格として拒否される(403)ことを確認する。
+    #[tokio::test]
+    async fn project_manager_can_decide_requests_scoped_to_their_own_project_but_not_others_or_grant_manage_members() {
+        let state = make_state("project-manager-decide", false).await;
+        let data_root = state.data_root.clone();
+        let admin = admin_token(&state);
+        // マネージャー役のセッショントークンも、OTPフローを経由せず
+        // `AuthStore`へ直接発行させる(`admin_token`と同じテスト用手段)。
+        let manager_token = state.auth.create_session("manager@example.com");
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        // プロジェクトマネージャー自身のアカウントを登録し、project_id=1に
+        // 対するallow_manage_membersを管理者が付与する(自己申請→承認)。
+        client.post("/api/accounts/request").body_json(&serde_json::json!({ "email": "manager@example.com" })).send().await.assert_status(poem::http::StatusCode::CREATED);
+        let manager_request_id = accounts::load(&data_root, &storage::LocalFsBackend).await.pending_requests[0].id.clone();
+        client
+            .post(format!("/api/accounts/requests/{manager_request_id}/decide"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "approve": true, "allow_view": true, "allow_edit": true, "allow_manage_members": true, "project_id": 1 }))
+            .send()
+            .await
+            .assert_status_is_ok();
+
+        // 一般ユーザーからの自己申請(project_id=1宛)。
+        client.post("/api/accounts/request").body_json(&serde_json::json!({ "email": "newcomer@example.com" })).send().await.assert_status(poem::http::StatusCode::CREATED);
+        let newcomer_request_id = accounts::load(&data_root, &storage::LocalFsBackend).await.pending_requests[0].id.clone();
+
+        // プロジェクトマネージャーが自分の管理するproject_id=1宛の申請を
+        // 審査できること(管理者トークンなしで成功)。
+        let decide_resp = client
+            .post(format!("/api/accounts/requests/{newcomer_request_id}/decide"))
+            .header("Authorization", format!("Bearer {manager_token}"))
+            .body_json(&serde_json::json!({ "approve": true, "allow_view": true, "allow_edit": false, "project_id": 1 }))
+            .send()
+            .await;
+        decide_resp.assert_status_is_ok();
+        let config = access::load(&data_root, 1, &storage::LocalFsBackend).await;
+        assert!(config.accounts.get("newcomer@example.com").expect("newcomer should have a grant").allow_view);
+
+        // 別プロジェクト(project_id=2)宛の申請は、project_id=1のマネージャー
+        // では審査できない(403)。
+        client.post("/api/accounts/request").body_json(&serde_json::json!({ "email": "other-project-user@example.com" })).send().await.assert_status(poem::http::StatusCode::CREATED);
+        let other_request_id = accounts::load(&data_root, &storage::LocalFsBackend).await.pending_requests[0].id.clone();
+        client
+            .post(format!("/api/accounts/requests/{other_request_id}/decide"))
+            .header("Authorization", format!("Bearer {manager_token}"))
+            .body_json(&serde_json::json!({ "approve": true, "allow_view": true, "project_id": 2 }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::FORBIDDEN);
+
+        // プロジェクトマネージャーはallow_manage_members: trueを新規に
+        // 付与できない(権限昇格の防止、403)。
+        client.post("/api/accounts/request").body_json(&serde_json::json!({ "email": "wanna-be-manager@example.com" })).send().await.assert_status(poem::http::StatusCode::CREATED);
+        let escalation_request_id = accounts::load(&data_root, &storage::LocalFsBackend).await.pending_requests[0].id.clone();
+        client
+            .post(format!("/api/accounts/requests/{escalation_request_id}/decide"))
+            .header("Authorization", format!("Bearer {manager_token}"))
+            .body_json(&serde_json::json!({ "approve": true, "allow_view": true, "allow_manage_members": true, "project_id": 1 }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::FORBIDDEN);
+    }
+
     #[tokio::test]
     async fn accounts_locked_rejects_non_admin_approval_with_403() {
         // このテストはローカル構築の`AppState`で`accounts_locked: true`を
@@ -1678,7 +1800,7 @@ mod handler_tests {
         // access::AccessConfigへ直接member@example.comへのedit許可を書き込み、
         // 実際にAuthStoreでセッションを発行してから許可されることを確認する。
         let mut config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
-        config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true });
+        config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true, allow_manage_members: false });
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
 
         // 新しいAppStateを同じdata_rootで作り直し(auth::AuthStoreは
@@ -1821,7 +1943,7 @@ mod handler_tests {
 
         // editを付与されたメンバーは投稿できる。
         let mut config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
-        config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true });
+        config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true, allow_manage_members: false });
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
         let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let member_session = member_state.auth.create_session("member@example.com");
@@ -1891,7 +2013,7 @@ mod handler_tests {
 
         // view権限を付与されたメンバーは200でコメント一覧を取得できる。
         let mut config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
-        config.accounts.insert("viewer@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: false });
+        config.accounts.insert("viewer@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: false, allow_manage_members: false });
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
         let viewer_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let viewer_session = viewer_state.auth.create_session("viewer@example.com");
@@ -2509,7 +2631,7 @@ mod handler_tests {
 
         // メンバー(editを持つ)による他人の記録削除は403(投稿者でも管理者でもない)。
         let mut config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
-        config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true });
+        config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true, allow_manage_members: false });
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
         let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let member_session = member_state.auth.create_session("member@example.com");

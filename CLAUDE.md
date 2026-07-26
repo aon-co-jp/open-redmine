@@ -81,6 +81,55 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
 
 ## HANDOFF
 
+- **2026-07-27(続き3) ロール権限管理の細分化: プロジェクトマネージャー
+  ロールを追加(グローバル管理者以外もプロジェクト単位でメンバー管理を
+  行えるようにした)——直前エントリの「次にすべきこと(2) ロール権限
+  管理の細分化」に対応**:
+  1. **`access.rs`**: `AccountPermission`に`allow_manage_members: bool`
+     を追加(`#[serde(default)]`で既存の保存データとの後方互換を維持)。
+     `Need`に`ManageMembers`を追加し、`is_allowed`で「メンバー管理は
+     アカウント個別の`allow_manage_members`のみが根拠になり、
+     `Mode::Public`の`allow_view`/`allow_edit`からは決して自動付与されない」
+     という設計にした(プロジェクトを公開設定にしても誰でもメンバー管理は
+     できない、という分離)。**正直な開示**: 「Manager/Developer/Reporter」
+     のような名前付きロールのプリセット自体はまだ無く、既存の
+     `allow_view`/`allow_edit`と同じ生のフラグを1つ追加しただけの
+     最小実装。
+  2. **`main.rs`**: `require_admin_or_project_manager(req, state,
+     project_id)`を新設(グローバル管理者、または指定`project_id`への
+     `Need::ManageMembers`を持つアカウントのいずれかを許可、`project_id`
+     が無い申請は引き続き管理者のみ)。`decide_access_request`
+     (`POST /api/accounts/requests/:id/decide`)をこれ経由に変更し、
+     `DecideAccessRequestPayload`に`allow_manage_members`フィールドを
+     追加。**権限昇格の防止**: プロジェクトマネージャー(グローバル管理者
+     ではない審査者)が`allow_manage_members: true`を新規に付与しようと
+     すると`403`で拒否する(メンバー管理権限自体の付与はグローバル管理者
+     のみに限定)。
+  3. **新規テスト2件**: `access::tests::manage_members_requires_explicit_
+     per_account_grant_and_ignores_public_mode`(public設定+view/edit両方
+     許可でもメンバー管理は不許可のまま、個別付与のみ有効になることを
+     確認)、`handler_tests::project_manager_can_decide_requests_scoped_
+     to_their_own_project_but_not_others_or_grant_manage_members`
+     (実HTTPリクエストで: 自分の管理するproject_id宛の申請を審査できる
+     こと、他プロジェクト宛の申請は403で拒否されること、
+     `allow_manage_members: true`の新規付与自体が403で拒否されること、
+     を一気通貫で確認)。
+  4. **検証(実測)**: `cargo test`**69→71件、全green**。
+  5. **正直な開示・残る制約**: (1) `GET /api/accounts/requests`
+     (保留中申請の一覧)は引き続き管理者のみに限定したまま(プロジェクト
+     マネージャーには公開していない——全プロジェクト横断の申請一覧を
+     見せてしまうと、管理していないプロジェクトの情報が漏れるため、
+     今回のスコープでは意図的に対象外とした)。プロジェクトマネージャーが
+     審査するには、申請IDを別途(メール等で)知っている必要がある。
+     (2) 名前付きロールのプリセット(Manager/Developer/Reporter等)・
+     ロール管理UI(Tauri/Web双方)は未着手。(3) `web/`側UIからの
+     メンバー管理操作(現状HTTP API止まり)も未着手。
+  - 次にすべきこと: (1) プロジェクトマネージャー向けに、自分が管理する
+    プロジェクト宛の保留中申請だけを見られる一覧エンドポイントの追加
+    (`GET /api/accounts/requests`の全件公開を避けつつ審査を容易にする)、
+    (2) 名前付きロールプリセットの導入、(3) `web/`側UIからのメンバー
+    管理操作。
+
 - **2026-07-27(続き2) `web/`側ブラウザGUIにチケット担当者(assignee)の
   選択・変更UIを追加——2つ前のエントリの「次にすべきこと(1) web/側UIの
   担当者選択欄」に対応**:
