@@ -395,20 +395,53 @@ pub fn selected_backend_name() -> String {
 }
 
 /// 起動時に実際に使う`StorageBackend`実装を選ぶファクトリ。
-/// **正直な開示**: `sftp`/`gdrive`は本体I/O(`read`/`write`/`ensure_dir`)
-/// がまだプレースホルダのため、選択してもデータ破損は起きない
-/// (エラーを返すだけ)が実際には保存先として機能しない。今回のスコープは
-/// `local`(既定)の実配線までであり、`sftp`/`gdrive`を選んだ場合は
-/// 警告ログを出しつつ`LocalFsBackend`にフォールバックする(黙って
-/// データを失うより安全側に倒す判断)。
+/// **正直な開示(2026-07-27更新)**: `SftpBackend`/`GDriveBackend`の本体
+/// I/O自体は実装済み(`ssh2`/`reqwest`経由の実通信コード、storage.rs
+/// 冒頭のdocコメント参照)だが、以前はこの関数自体が`"sftp"`/`"gdrive"`
+/// のいずれを指定しても常に`LocalFsBackend`へフォールバックしていた
+/// (実装済みのバックエンドへ実際にルーティングされない配線漏れ、
+/// 2026-07-27にCLAUDE.md調査で発見)。今回、実際に選択できるよう修正した:
+/// - `"sftp"`: `sftp` feature有効かつ`RSCHIKETTO_SFTP_HOST`/
+///   `RSCHIKETTO_SFTP_USER`が設定されていれば`SftpBackend`を使う。
+///   feature無効、または必須環境変数が欠けている場合は警告を出して
+///   `LocalFsBackend`へフォールバックする(黙ってデータを失わない設計)。
+/// - `"gdrive"`: `RSCHIKETTO_GDRIVE_ACCESS_TOKEN`が設定されていれば
+///   `GDriveBackend`を使う。未設定なら同様に警告してフォールバックする。
+/// 実SFTPサーバー・実Googleドライブアカウントでの実地到達確認は、
+/// このパスでもモック/インプロセスサーバーでの検証(下記テスト参照)に
+/// 留まる——完全に実クラウド環境での確認ではない、引き続きの制約。
 pub fn backend_from_env() -> std::sync::Arc<dyn StorageBackend> {
     let name = selected_backend_name();
     match name.as_str() {
         "local" => std::sync::Arc::new(LocalFsBackend),
-        other => {
+        #[cfg(feature = "sftp")]
+        "sftp" => match SftpConfig::from_env() {
+            Some(config) => std::sync::Arc::new(SftpBackend::new(config)),
+            None => {
+                tracing::warn!(
+                    "RSCHIKETTO_STORAGE_BACKEND=sftp was requested, but RSCHIKETTO_SFTP_HOST/RSCHIKETTO_SFTP_USER are not both set — falling back to LocalFsBackend"
+                );
+                std::sync::Arc::new(LocalFsBackend)
+            }
+        },
+        #[cfg(not(feature = "sftp"))]
+        "sftp" => {
             tracing::warn!(
-                "RSCHIKETTO_STORAGE_BACKEND={other} was requested, but its StorageBackend I/O is not yet wired to a real destination (see storage.rs docs) — falling back to LocalFsBackend to avoid silent data loss"
+                "RSCHIKETTO_STORAGE_BACKEND=sftp was requested, but this binary was built without the `sftp` feature — falling back to LocalFsBackend"
             );
+            std::sync::Arc::new(LocalFsBackend)
+        }
+        "gdrive" => match GDriveConfig::from_env() {
+            Some(config) => std::sync::Arc::new(GDriveBackend::new(config)),
+            None => {
+                tracing::warn!(
+                    "RSCHIKETTO_STORAGE_BACKEND=gdrive was requested, but RSCHIKETTO_GDRIVE_ACCESS_TOKEN is not set — falling back to LocalFsBackend"
+                );
+                std::sync::Arc::new(LocalFsBackend)
+            }
+        },
+        other => {
+            tracing::warn!("RSCHIKETTO_STORAGE_BACKEND={other} is not a recognized backend (local/sftp/gdrive) — falling back to LocalFsBackend");
             std::sync::Arc::new(LocalFsBackend)
         }
     }
@@ -417,6 +450,16 @@ pub fn backend_from_env() -> std::sync::Arc<dyn StorageBackend> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `RSCHIKETTO_STORAGE_BACKEND`等のプロセス全体のグローバル環境変数を
+    /// 読み書きするテスト同士が、`cargo test`の既定の並行実行(複数OS
+    /// スレッド)で競合しないようにする排他ロック(2026-07-27追加——
+    /// `backend_from_env`の実バックエンド選択テスト追加時に、実際に
+    /// このレースが原因の`FAILED`を再現・確認した上で導入した)。
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[tokio::test]
     async fn local_fs_backend_round_trips_write_read_exists() {
@@ -522,14 +565,103 @@ mod tests {
 
     #[test]
     fn selected_backend_name_defaults_to_local() {
+        let _guard = env_test_lock();
         std::env::remove_var("RSCHIKETTO_STORAGE_BACKEND");
         assert_eq!(selected_backend_name(), "local");
     }
 
     #[test]
     fn selected_backend_name_reads_env_override() {
+        let _guard = env_test_lock();
         std::env::set_var("RSCHIKETTO_STORAGE_BACKEND", "gdrive");
         assert_eq!(selected_backend_name(), "gdrive");
+        std::env::remove_var("RSCHIKETTO_STORAGE_BACKEND");
+    }
+
+    /// 2026-07-27追加: `backend_from_env`が`"sftp"`/`"gdrive"`指定時に
+    /// 実際にそれぞれのバックエンドへルーティングされること(以前は常に
+    /// `LocalFsBackend`へフォールバックしていた配線漏れの回帰テスト)。
+    /// 実SFTPサーバー/実Googleドライブアカウントは無いため、「実際に
+    /// ネットワーク接続を試みて失敗する」ことを間接的な証拠として使う
+    /// ——`LocalFsBackend`ならローカルファイルI/Oのみで完結し、
+    /// 到達不能なホストへの接続を試みることは無い。
+    #[cfg(feature = "sftp")]
+    #[tokio::test]
+    async fn backend_from_env_selects_sftp_backend_when_configured() {
+        let _guard = env_test_lock();
+        std::env::set_var("RSCHIKETTO_STORAGE_BACKEND", "sftp");
+        // 到達不能なポート(何もlistenしていないはず)を指定し、
+        // SftpBackendが実際に接続を試みてエラーになることを確認する。
+        std::env::set_var("RSCHIKETTO_SFTP_HOST", "127.0.0.1");
+        std::env::set_var("RSCHIKETTO_SFTP_PORT", "1");
+        std::env::set_var("RSCHIKETTO_SFTP_USER", "test-user");
+        std::env::set_var("RSCHIKETTO_SFTP_PASSWORD", "test-password");
+
+        let backend = backend_from_env();
+        let result = backend.write("some/path.json", b"{}").await;
+        assert!(result.is_err(), "SftpBackend should attempt a real connection and fail against an unreachable host, not silently succeed via local fs");
+
+        std::env::remove_var("RSCHIKETTO_STORAGE_BACKEND");
+        std::env::remove_var("RSCHIKETTO_SFTP_HOST");
+        std::env::remove_var("RSCHIKETTO_SFTP_PORT");
+        std::env::remove_var("RSCHIKETTO_SFTP_USER");
+        std::env::remove_var("RSCHIKETTO_SFTP_PASSWORD");
+    }
+
+    #[cfg(feature = "sftp")]
+    #[tokio::test]
+    async fn backend_from_env_falls_back_to_local_when_sftp_requested_without_required_env() {
+        let _guard = env_test_lock();
+        std::env::set_var("RSCHIKETTO_STORAGE_BACKEND", "sftp");
+        std::env::remove_var("RSCHIKETTO_SFTP_HOST");
+        std::env::remove_var("RSCHIKETTO_SFTP_USER");
+
+        let dir = std::env::temp_dir().join(format!("rschiketto-storage-fallback-test-{}", rand::random::<u64>()));
+        let file = dir.join("data.json");
+        let backend = backend_from_env();
+        // RSCHIKETTO_SFTP_HOST/USERが無いため、実際にはLocalFsBackendへ
+        // フォールバックしているはず(=ローカルファイルへの書き込みが
+        // 実際に成功する)。
+        backend.write(&file.to_string_lossy(), b"{}").await.unwrap();
+        assert!(tokio::fs::metadata(&file).await.is_ok());
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+        std::env::remove_var("RSCHIKETTO_STORAGE_BACKEND");
+    }
+
+    #[tokio::test]
+    async fn backend_from_env_selects_gdrive_backend_and_attempts_a_real_http_request() {
+        let _guard = env_test_lock();
+        std::env::set_var("RSCHIKETTO_STORAGE_BACKEND", "gdrive");
+        std::env::set_var("RSCHIKETTO_GDRIVE_ACCESS_TOKEN", "test-token-not-real");
+
+        let backend = backend_from_env();
+        // 実Googleドライブへ実際にHTTPリクエストを送り(トークンは偽物の
+        // ため認証は失敗する想定)、ローカルファイルへ黙って書き込まれる
+        // (=フォールバック)のではないことを確認する。ネットワーク自体に
+        // 到達できない実行環境ではこのテスト自体が失敗しうるため、
+        // 到達できたことを前提にする(CIでネットワークが使えない場合は
+        // 別途スキップ判断が必要、正直な開示)。
+        let result = backend.write("some/path.json", b"{}").await;
+        assert!(result.is_err(), "GDriveBackend should attempt a real HTTPS request to googleapis.com and fail with a fake token, not silently succeed via local fs");
+
+        std::env::remove_var("RSCHIKETTO_STORAGE_BACKEND");
+        std::env::remove_var("RSCHIKETTO_GDRIVE_ACCESS_TOKEN");
+    }
+
+    #[tokio::test]
+    async fn backend_from_env_falls_back_to_local_when_gdrive_requested_without_token() {
+        let _guard = env_test_lock();
+        std::env::set_var("RSCHIKETTO_STORAGE_BACKEND", "gdrive");
+        std::env::remove_var("RSCHIKETTO_GDRIVE_ACCESS_TOKEN");
+
+        let dir = std::env::temp_dir().join(format!("rschiketto-storage-gdrive-fallback-test-{}", rand::random::<u64>()));
+        let file = dir.join("data.json");
+        let backend = backend_from_env();
+        backend.write(&file.to_string_lossy(), b"{}").await.unwrap();
+        assert!(tokio::fs::metadata(&file).await.is_ok());
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
         std::env::remove_var("RSCHIKETTO_STORAGE_BACKEND");
     }
 }
