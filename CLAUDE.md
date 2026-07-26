@@ -81,6 +81,97 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
 
 ## HANDOFF
 
+- **2026-07-26 Redmine実機能に基づく本家調査+トラッカー種別・課題関連・
+  作業時間記録の3増分を実装(ユーザー指示「redmineの公式ドキュメント
+  https://www.redmine.org/ これとそっくりにお願い これをRust+RPoemで
+  実装して一から再現して」——本プロジェクトは既にクリーンルーム実装
+  であるため、指示を「機能セット・挙動のfeature parity拡大」と解釈し、
+  Redmine本家のGPLコードは一切参照・コピーしていない)**:
+  1. **調査**: `redmine.org`のRedmineFeaturesページ等を参照し、
+     複数トラッカー(Bug/Feature/Support等)・カスタムフィールド・
+     ガントチャート/カレンダー・ロードマップ/バージョン・
+     サブプロジェクト階層・ロール権限管理・ニュース/フォーラム/
+     ドキュメント/ファイル・課題の関連(blocks/duplicates/precedes等)・
+     ウォッチャー・保存済みカスタムクエリ・REST API・アクティビティ
+     フィード・SCM連携、という実際の機能一覧を確認。既存コード
+     (`src/`)と突き合わせ、ガントチャート用フィールド・
+     サブプロジェクト・アクセス制御・Wiki・コメントは既に対応済みだが、
+     複数トラッカー・課題の関連・作業時間記録・ロール権限の細分化
+     (現状は閲覧/編集の2値のみ)・カスタムフィールド・保存済み
+     クエリはいずれも未実装、という現状を確認した(README/CLAUDE.mdの
+     「2〜3割程度」という自己申告はコードの実態と一致していた)。
+  2. **実装した増分(3件、いずれも既存の`Store`+JSONファイル永続化
+     パターンをそのまま踏襲)**:
+     - **トラッカー種別**: `Ticket`に`tracker: Tracker`
+       (`Bug`/`Feature`/`Support`/`Task`の固定4種、`#[serde(default)]`
+       で既存データは`Bug`扱い、後方互換維持)を追加。
+       `CreateTicketRequest`/`UpdateTicketRequest`で指定可能、
+       `GET /api/tickets?tracker=...`で絞り込み可能。**正直な開示**:
+       Redmine本家はトラッカー自体をプロジェクト単位で管理者が
+       自由に追加・削除できる管理画面を持つが、今回は固定4種の
+       enumのみ——トラッカー管理画面(CRUD)は対象外とした。
+     - **課題の関連(issue relations)**: `src/relations.rs`を新設
+       (`IssueRelation { id, from_ticket_id, to_ticket_id, kind }`、
+       `RelationStore`)。`kind`は`Blocks`/`Duplicates`/`Precedes`の
+       3種にスコープを絞る(`blocked_by`は`Blocks`の逆方向として
+       `from`/`to`の立場で表現、Redmine本家にある`relates`/
+       `copied_to`等その他の関連種別は対象外——正直な開示)。
+       `POST/GET /api/tickets/:id/relations`(作成は自己参照・
+       存在しない相手・重複登録を`400`で拒否、一覧は`from`/`to`
+       双方の立場から見える)・`DELETE /api/relations/:id`
+       (`from`側チケットの所属プロジェクトへの編集権限で判定)。
+     - **作業時間記録(time tracking)**: `src/time_entries.rs`を新設
+       (`TimeEntry { id, ticket_id, author_email, hours, activity,
+       comments, spent_on, created_at }`、`TimeEntryStore`、
+       `total_hours_for`ヘルパーで集計可能)。`hours`は0より大きく
+       24以下(1日の記録として非現実的な値を拒否する実用上の
+       妥当性チェック)。`POST/GET /api/tickets/:id/time_entries`・
+       `DELETE /api/time_entries/:id`(管理者または記録した本人のみ、
+       コメント削除と同じ権限パターン)。**正直な開示**: Redmine本家の
+       「作業分類(Activity)のプロジェクト単位カスタマイズ」「時間集計
+       レポート画面(GUI)」「請求可能時間の管理」は対象外——`activity`
+       は自由入力の文字列として保持する簡易実装。
+  3. **未着手のまま残る項目(正直な開示、優先度順)**: (1) 担当者
+     (`assignee`)フィールド自体が未実装のため、担当者フィルタ・
+     ウォッチャー機能の前提が揃っていない、(2) ロール権限管理の細分化
+     (現状は閲覧/編集の2値のみ、Redmine本家のような「管理者/開発者/
+     報告者」等の複数ロール+ロールごとの操作権限マトリクスは未実装)、
+     (3) カスタムフィールド、(4) 保存済みカスタムクエリ/フィルタ、
+     (5) ガントチャート・カレンダー・時間記録集計のGUI描画
+     (`web/`側、バックエンドのフィールド・APIのみ今回追加)、
+     (6) フォーラム/ニュース/ドキュメント/ファイルモジュール、
+     (7) SCM(リポジトリ)連携、(8) ウォッチャー機能。
+  4. **検証**: `cargo build`エラー0件(既存の未配線`SftpConfig`等の
+     警告のみ、新規警告は今回追加した`total_hours_for`の未使用警告のみ
+     ——GUI側での利用は次回課題)。`cargo test` **66件全green**
+     (既存57件+今回9件: `relations.rs`単体3件・`time_entries.rs`単体3件・
+     ハンドラレベル3件〈`ticket_tracker_defaults_to_bug_is_filterable_
+     and_updatable`: 既定値/フィルタ/更新、
+     `issue_relation_lifecycle_and_access_gating`: 作成・自己参照拒否・
+     存在しない相手拒否・重複拒否・from/to双方からの一覧・削除・401/403、
+     `time_entry_lifecycle_validates_hours_and_gates_deletion`: 投稿・
+     一覧・`hours`範囲外拒否・投稿者/管理者以外の削除拒否・401/403〉)。
+     実バイナリでのcurlスモークテスト
+     (`RSCHIKETTO_DATA_DIR`一時ディレクトリ、`RSCHIKETTO_PORT=8399`、
+     `RSCHIKETTO_ACCOUNTS_LOCKED=false`、SMTP未設定): `GET /healthz`→
+     `200`、`GET /api/tickets?tracker=feature`(未認証)→`200`(空配列)、
+     `POST /api/tickets/1/relations`(存在しないチケット、未認証)→`404`
+     (存在チェックが認証チェックより先に走る既存設計通り)、
+     `POST /api/tickets/1/time_entries`(存在しないチケット、未認証)→`401`
+     (`time_entries`側は`session_email`チェックを先に行う設計のため、
+     `relations`側とは順序が異なる——いずれも既存の`comments.rs`系
+     ハンドラの前例パターンをそのまま踏襲した結果で、意図的な非統一
+     ではないが、正直に開示しておく)、をいずれも確認。
+  5. **未対応(今回のスコープ外、正直な開示)**: `web/`(WASM
+     フロントエンド)側にトラッカー選択・課題関連・作業時間記録の
+     UIは今回追加していない——バックエンドAPI・データモデルの追加が
+     今回のスコープであり、GUI反映は次回課題とした(狭くても実装が
+     本物であることを優先、という既存方針に基づく判断)。
+  - 次にすべきこと: (1) `web/`側にトラッカー選択・課題関連表示・
+    作業時間記録UIを追加、(2) 担当者(`assignee`)フィールドの追加、
+    (3) ロール権限管理の細分化、(4) ガントチャート・カレンダーの
+    GUI描画、(5) カスタムフィールド、(6) 保存済みカスタムクエリ。
+
 - **2026-07-24 スマホ縦画面レスポンシブ対応+英語(日本語)ハイブリッド表示を
   ブラウザGUI(`web/`)に追加(ユーザー指示「open-easy-webとRS-Redブラウザ版
   の完成度と実用性を高めて。スマホだと縦画面にも自動切換えしてする機能を
