@@ -26,6 +26,17 @@ impl Default for Mode {
 pub struct AccountPermission {
     pub allow_view: bool,
     pub allow_edit: bool,
+    /// このプロジェクトのメンバー管理(保留中のアクセス申請の承認/却下・
+    /// 権限付与)を許可するか(ロール権限管理の細分化、2026-07-27追加)。
+    /// これが`true`のアカウントは、グローバル管理者(`AppState.admin_email`)
+    /// でなくても、この`project_id`宛の申請に限り審査できる
+    /// (`main.rs`の`decide_access_request`参照)。Redmine本家の
+    /// 「プロジェクトのマネージャーロール」相当だが、ロール名の概念自体は
+    /// 導入せず、この1フラグのみを追加した最小実装(正直な開示——
+    /// 「Manager/Developer/Reporter」といった名前付きロールのプリセットは
+    /// まだ無く、既存の`allow_view`/`allow_edit`と同じ生のフラグとして
+    /// 扱う)。
+    pub allow_manage_members: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +58,12 @@ impl Default for AccessConfig {
 pub enum Need {
     View,
     Edit,
+    /// このプロジェクトのメンバー管理(アクセス申請の審査・権限付与)。
+    /// `Mode::Public`の`allow_view`/`allow_edit`とは独立——プロジェクトを
+    /// 公開設定にしても、それだけでは誰もメンバー管理はできない
+    /// (アカウント個別の`allow_manage_members`のみが根拠になる、
+    /// 2026-07-27追加)。
+    ManageMembers,
 }
 
 /// `config`と(ログイン中なら)アカウントのメールアドレスから、`need`の
@@ -59,15 +76,22 @@ pub fn is_allowed(config: &AccessConfig, need: Need, account_email: Option<&str>
             let flag = match need {
                 Need::View => perm.allow_view,
                 Need::Edit => perm.allow_edit,
+                Need::ManageMembers => perm.allow_manage_members,
             };
             if flag {
                 return true;
             }
         }
     }
+    if need == Need::ManageMembers {
+        // メンバー管理はpublic公開設定からは決して付与されない
+        // (アカウント個別の`allow_manage_members`のみが根拠)。
+        return false;
+    }
     let flag = match need {
         Need::View => config.allow_view,
         Need::Edit => config.allow_edit,
+        Need::ManageMembers => unreachable!("handled above"),
     };
     flag && config.mode == Mode::Public
 }
@@ -111,9 +135,22 @@ mod tests {
     #[test]
     fn account_specific_grant_works_even_when_project_is_private() {
         let mut config = AccessConfig { mode: Mode::Private, allow_view: false, allow_edit: false, accounts: HashMap::new() };
-        config.accounts.insert("member@example.com".to_string(), AccountPermission { allow_view: true, allow_edit: false });
+        config.accounts.insert("member@example.com".to_string(), AccountPermission { allow_view: true, allow_edit: false, allow_manage_members: false });
         assert!(is_allowed(&config, Need::View, Some("member@example.com")));
         assert!(!is_allowed(&config, Need::Edit, Some("member@example.com")));
         assert!(!is_allowed(&config, Need::View, Some("someone-else@example.com")));
+    }
+
+    #[test]
+    fn manage_members_requires_explicit_per_account_grant_and_ignores_public_mode() {
+        let mut config = AccessConfig { mode: Mode::Public, allow_view: true, allow_edit: true, accounts: HashMap::new() };
+        // publicかつview/edit両方許可でも、メンバー管理は別軸のため未許可。
+        assert!(!is_allowed(&config, Need::ManageMembers, None));
+        assert!(!is_allowed(&config, Need::ManageMembers, Some("nobody@example.com")));
+
+        config.accounts.insert("manager@example.com".to_string(), AccountPermission { allow_view: true, allow_edit: true, allow_manage_members: true });
+        assert!(is_allowed(&config, Need::ManageMembers, Some("manager@example.com")));
+        // 他のアカウントには影響しない。
+        assert!(!is_allowed(&config, Need::ManageMembers, Some("someone-else@example.com")));
     }
 }
