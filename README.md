@@ -8,8 +8,10 @@
 Rust+[poem](https://github.com/poem-web/poem)(RPoem)版。運用時はVPSレンタル
 サーバー費用を安く抑えられる予定です。
 
-> ⚠️ v0.1.0時点ではチケット(Issue)・プロジェクトのCRUD・Wiki・コメントまで。
-> Redmine全体の機能網羅率としてはまだ2〜3割程度。詳細は`CLAUDE.md`参照。
+> ⚠️ v0.1.0時点ではチケット(Issue)・プロジェクトのCRUD・Wiki・コメントに加え、
+> トラッカー種別(Bug/Feature/Support/Task)・課題関連(blocks/duplicates/
+> precedes)・作業時間記録(time tracking)まで(2026-07-26追加)。
+> Redmine全体の機能網羅率としてはまだ3割程度。詳細は`CLAUDE.md`参照。
 
 ## ブラウザGUI(`web/`、Rust→WebAssembly)
 
@@ -54,10 +56,14 @@ wasm-bindgen --target web --no-typescript --out-dir pkg target/wasm32-unknown-un
 | `GET /api/projects` / `POST /api/projects` | プロジェクト一覧取得(認証不要) / 新規作成(管理者のみ、`parent_id`でサブプロジェクト化可能) |
 | `GET /api/projects/:id` / `PUT /api/projects/:id` / `DELETE /api/projects/:id` | プロジェクト詳細取得(認証不要) / 更新・削除(管理者のみ、`parent_id`変更は循環参照を拒否) |
 | `GET /api/projects/:id/children` | 直接の子プロジェクト一覧(認証不要) |
-| `GET /api/tickets` / `POST /api/tickets` | チケット一覧取得(アクセス権のあるプロジェクトのみ、`status`/`project_id`クエリパラメータで絞り込み可能) / 新規作成(実在する`project_id`が必要、`start_date`/`due_date`/`done_ratio`はガントチャート用の任意フィールド) |
-| `GET /api/tickets/:id` / `PUT /api/tickets/:id` | チケット詳細取得 / 更新(ステータス・`start_date`/`due_date`/`done_ratio`の変更含む) |
+| `GET /api/tickets` / `POST /api/tickets` | チケット一覧取得(アクセス権のあるプロジェクトのみ、`status`/`project_id`/`tracker`クエリパラメータで絞り込み可能) / 新規作成(実在する`project_id`が必要、`tracker`〈`bug`/`feature`/`support`/`task`、省略時`bug`〉、`start_date`/`due_date`/`done_ratio`はガントチャート用の任意フィールド) |
+| `GET /api/tickets/:id` / `PUT /api/tickets/:id` | チケット詳細取得 / 更新(ステータス・`tracker`・`start_date`/`due_date`/`done_ratio`の変更含む) |
 | `GET /api/tickets/:id/comments` / `POST /api/tickets/:id/comments` | コメント一覧取得(閲覧権限が必要) / 投稿(編集権限が必要) |
 | `DELETE /api/comments/:id` | コメント削除(管理者または投稿者本人のみ) |
+| `GET /api/tickets/:id/relations` / `POST /api/tickets/:id/relations` | チケット間の関連(`blocks`/`duplicates`/`precedes`)一覧(from/to双方の立場で表示、閲覧権限が必要) / 新規作成(編集権限が必要、自己参照・存在しない相手・重複登録は`400`で拒否) |
+| `DELETE /api/relations/:id` | 関連の削除(`from`側チケットが所属するプロジェクトへの編集権限が必要) |
+| `GET /api/tickets/:id/time_entries` / `POST /api/tickets/:id/time_entries` | 作業時間記録一覧(閲覧権限が必要) / 新規作成(編集権限が必要、`hours`は0より大きく24以下、`activity`/`spent_on`必須) |
+| `DELETE /api/time_entries/:id` | 作業時間記録の削除(管理者または記録した本人のみ) |
 | `GET /api/projects/:id/wiki` / `POST /api/projects/:id/wiki` | プロジェクト配下のWikiページ一覧(閲覧権限が必要) / 新規作成(編集権限が必要、`slug`はプロジェクト内で一意) |
 | `GET /api/wiki/:id` / `PUT /api/wiki/:id` | Wikiページ取得(改訂履歴含む、閲覧権限が必要) / 新しいリビジョンを追記(編集権限が必要、旧版は履歴に保持) |
 | `DELETE /api/wiki/:id` | Wikiページ削除(管理者のみ) |

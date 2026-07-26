@@ -27,8 +27,10 @@ mod comments;
 mod ddns;
 mod mail;
 mod project;
+mod relations;
 mod rustjson;
 mod storage;
+mod time_entries;
 mod wiki;
 
 use std::path::PathBuf;
@@ -276,12 +278,34 @@ enum TicketStatus {
     Closed,
 }
 
+/// チケットの種別(Redmineの「トラッカー」相当、Bug/Feature/Support/Task
+/// の固定4種にスコープを絞る——Redmine本家はプロジェクト単位でトラッカー
+/// 自体を管理者が自由に追加・削除できるが、その管理画面までは今回は
+/// 対象外。既存チケットは`#[serde(default)]`で`Bug`扱いとして後方互換を保つ)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Tracker {
+    Bug,
+    Feature,
+    Support,
+    Task,
+}
+
+impl Default for Tracker {
+    fn default() -> Self {
+        Tracker::Bug
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Ticket {
     id: u64,
     title: String,
     description: String,
     status: TicketStatus,
+    /// チケット種別(Redmine機能ギャップ対応、2026-07-26追加)。
+    #[serde(default)]
+    tracker: Tracker,
     /// チケットが所属する`Project`の`id`(実体を持つ`project.rs`の
     /// `Project`エンティティを参照、旧`project: String`+ハッシュの
     /// 置き換え——CLAUDE.md HANDOFF「(3) Project自体のCRUD」対応)。
@@ -328,6 +352,8 @@ struct CreateTicketRequest {
     /// 所属`Project`の`id`(実在確認は`create_ticket`内で行う)。
     project_id: u64,
     #[serde(default)]
+    tracker: Option<Tracker>,
+    #[serde(default)]
     start_date: Option<String>,
     #[serde(default)]
     due_date: Option<String>,
@@ -364,6 +390,7 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
         title: body.title.clone(),
         description: body.description.clone(),
         status: TicketStatus::Open,
+        tracker: body.tracker.unwrap_or_default(),
         project_id: body.project_id,
         start_date: body.start_date.clone(),
         due_date: body.due_date.clone(),
@@ -414,6 +441,13 @@ async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Respo
         _ => None,
     });
     let project_filter: Option<u64> = query.get("project_id").and_then(|s| s.parse().ok());
+    let tracker_filter: Option<Tracker> = query.get("tracker").and_then(|s| match s.as_str() {
+        "bug" => Some(Tracker::Bug),
+        "feature" => Some(Tracker::Feature),
+        "support" => Some(Tracker::Support),
+        "task" => Some(Tracker::Task),
+        _ => None,
+    });
     let store = load_tickets(&state.data_root).await;
     let mut visible = Vec::new();
     for ticket in &store.tickets {
@@ -425,6 +459,11 @@ async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Respo
         }
         if let Some(pid) = project_filter {
             if ticket.project_id != pid {
+                continue;
+            }
+        }
+        if let Some(want) = tracker_filter {
+            if ticket.tracker != want {
                 continue;
             }
         }
@@ -461,6 +500,8 @@ struct UpdateTicketRequest {
     description: Option<String>,
     status: Option<TicketStatus>,
     #[serde(default)]
+    tracker: Option<Tracker>,
+    #[serde(default)]
     start_date: Option<String>,
     #[serde(default)]
     due_date: Option<String>,
@@ -494,6 +535,9 @@ async fn update_ticket(
     }
     if let Some(status) = &body.status {
         ticket.status = status.clone();
+    }
+    if let Some(tracker) = body.tracker {
+        ticket.tracker = tracker;
     }
     if let Some(done_ratio) = body.done_ratio {
         if done_ratio_out_of_range(done_ratio) {
@@ -593,6 +637,188 @@ async fn delete_comment(req: &Request, PathExtractor(id): PathExtractor<u64>, st
     }
     store.comments.retain(|c| c.id != id);
     comments::save(&state.data_root, &store, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Response::builder().status(poem::http::StatusCode::OK).body("deleted"))
+}
+
+#[derive(Deserialize)]
+struct CreateRelationRequest {
+    to_ticket_id: u64,
+    kind: relations::RelationKind,
+}
+
+/// `POST /api/tickets/:id/relations` — チケット間の関連(ブロック/重複/
+/// 先行)を作成する。`from`側チケットが所属するプロジェクトへの
+/// `Need::Edit`権限が必要(コメント投稿と同じ権限モデル)。`to_ticket_id`が
+/// 実在しない場合・自分自身を指した場合・同じ`(from, to, kind)`の関連が
+/// 既に存在する場合はいずれも`400`で拒否する。
+#[handler]
+async fn create_relation(
+    req: &Request,
+    PathExtractor(from_id): PathExtractor<u64>,
+    state: Data<&AppState>,
+    body: poem::web::Json<CreateRelationRequest>,
+) -> PoemResult<Response> {
+    let tickets = load_tickets(&state.data_root).await;
+    let Some(from_ticket) = tickets.tickets.iter().find(|t| t.id == from_id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
+    };
+    check_project_access(req, &state, from_ticket.project_id, access::Need::Edit).await?;
+    if body.to_ticket_id == from_id {
+        return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("a ticket cannot relate to itself"));
+    }
+    if !tickets.tickets.iter().any(|t| t.id == body.to_ticket_id) {
+        return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("to_ticket_id does not refer to an existing ticket"));
+    }
+    let mut store = relations::load(&state.data_root, state.backend.as_ref()).await;
+    if store.duplicate_exists(from_id, body.to_ticket_id, body.kind) {
+        return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("this relation already exists"));
+    }
+    let id = store.next_id;
+    store.next_id += 1;
+    let relation = relations::IssueRelation {
+        id,
+        from_ticket_id: from_id,
+        to_ticket_id: body.to_ticket_id,
+        kind: body.kind,
+        created_at: project::now_rfc3339(),
+    };
+    store.relations.push(relation.clone());
+    relations::save(&state.data_root, &store, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Response::builder()
+        .status(poem::http::StatusCode::CREATED)
+        .content_type("application/json")
+        .body(serde_json::to_vec(&relation).unwrap_or_default()))
+}
+
+/// `GET /api/tickets/:id/relations` — チケットが関わる関連の一覧
+/// (`from`/`to`いずれの立場でも含む)。閲覧には対象チケットが所属する
+/// プロジェクトへの`Need::View`権限が必要。
+#[handler]
+async fn list_relations(req: &Request, PathExtractor(ticket_id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let tickets = load_tickets(&state.data_root).await;
+    let Some(ticket) = tickets.tickets.iter().find(|t| t.id == ticket_id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
+    };
+    check_project_access(req, &state, ticket.project_id, access::Need::View).await?;
+    let store = relations::load(&state.data_root, state.backend.as_ref()).await;
+    let visible: Vec<&relations::IssueRelation> = store.for_ticket(ticket_id);
+    Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&visible).unwrap_or_default()))
+}
+
+/// `DELETE /api/relations/:id` — 関連を削除する。`from`側チケットが所属する
+/// プロジェクトへの`Need::Edit`権限が必要(片方向の関係だが、`from`側で
+/// 権限判定すれば実用上十分という判断)。
+#[handler]
+async fn delete_relation(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let mut store = relations::load(&state.data_root, state.backend.as_ref()).await;
+    let Some(relation) = store.find(id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("relation not found"));
+    };
+    let tickets = load_tickets(&state.data_root).await;
+    let Some(from_ticket) = tickets.tickets.iter().find(|t| t.id == relation.from_ticket_id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
+    };
+    check_project_access(req, &state, from_ticket.project_id, access::Need::Edit).await?;
+    store.relations.retain(|r| r.id != id);
+    relations::save(&state.data_root, &store, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Response::builder().status(poem::http::StatusCode::OK).body("deleted"))
+}
+
+#[derive(Deserialize)]
+struct CreateTimeEntryRequest {
+    hours: f64,
+    activity: String,
+    #[serde(default)]
+    comments: String,
+    spent_on: String,
+}
+
+/// `POST /api/tickets/:id/time_entries` — チケットへ作業時間を記録する。
+/// 対象チケットが所属するプロジェクトへの`Need::Edit`権限が必要
+/// (コメント投稿と同じ権限モデル)。`hours`は`0`より大きく`24`以下
+/// (1日の作業記録として非現実的な値を弾く実用上の妥当性チェック)。
+#[handler]
+async fn create_time_entry(
+    req: &Request,
+    PathExtractor(ticket_id): PathExtractor<u64>,
+    state: Data<&AppState>,
+    body: poem::web::Json<CreateTimeEntryRequest>,
+) -> PoemResult<Response> {
+    let Some(email) = session_email(req, &state) else {
+        return Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED));
+    };
+    let tickets = load_tickets(&state.data_root).await;
+    let Some(ticket) = tickets.tickets.iter().find(|t| t.id == ticket_id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
+    };
+    check_project_access(req, &state, ticket.project_id, access::Need::Edit).await?;
+    if !(body.hours > 0.0 && body.hours <= 24.0) {
+        return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("hours must be greater than 0 and at most 24"));
+    }
+    if body.activity.trim().is_empty() {
+        return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("activity must not be empty"));
+    }
+    let mut store = time_entries::load(&state.data_root, state.backend.as_ref()).await;
+    let id = store.next_id;
+    store.next_id += 1;
+    let entry = time_entries::TimeEntry {
+        id,
+        ticket_id,
+        author_email: email,
+        hours: body.hours,
+        activity: body.activity.clone(),
+        comments: body.comments.clone(),
+        spent_on: body.spent_on.clone(),
+        created_at: project::now_rfc3339(),
+    };
+    store.entries.push(entry.clone());
+    time_entries::save(&state.data_root, &store, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Response::builder()
+        .status(poem::http::StatusCode::CREATED)
+        .content_type("application/json")
+        .body(serde_json::to_vec(&entry).unwrap_or_default()))
+}
+
+/// `GET /api/tickets/:id/time_entries` — チケットの作業時間記録一覧。
+/// 対象チケットが所属するプロジェクトへの`Need::View`権限が必要。
+#[handler]
+async fn list_time_entries(req: &Request, PathExtractor(ticket_id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let tickets = load_tickets(&state.data_root).await;
+    let Some(ticket) = tickets.tickets.iter().find(|t| t.id == ticket_id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
+    };
+    check_project_access(req, &state, ticket.project_id, access::Need::View).await?;
+    let store = time_entries::load(&state.data_root, state.backend.as_ref()).await;
+    let visible: Vec<&time_entries::TimeEntry> = store.for_ticket(ticket_id);
+    Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&visible).unwrap_or_default()))
+}
+
+/// `DELETE /api/time_entries/:id` — 作業時間記録を削除する。管理者、または
+/// 記録の投稿者本人のみ許可(コメント削除と同じ権限パターン)。
+#[handler]
+async fn delete_time_entry(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let Some(email) = session_email(req, &state) else {
+        return Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED));
+    };
+    let mut store = time_entries::load(&state.data_root, state.backend.as_ref()).await;
+    let Some(entry) = store.find(id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("time entry not found"));
+    };
+    let is_admin = email == state.admin_email;
+    let is_author = entry.author_email == email;
+    if !is_admin && !is_author {
+        return Err(poem::Error::from_string("only the time entry author or an admin may delete this time entry", poem::http::StatusCode::FORBIDDEN));
+    }
+    store.entries.retain(|e| e.id != id);
+    time_entries::save(&state.data_root, &store, state.backend.as_ref())
         .await
         .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Response::builder().status(poem::http::StatusCode::OK).body("deleted"))
@@ -1072,6 +1298,10 @@ fn build_routes(state: AppState) -> impl poem::Endpoint {
         .at("/api/tickets/:id", get(get_ticket).put(update_ticket))
         .at("/api/tickets/:id/comments", get(list_comments).post(create_comment))
         .at("/api/comments/:id", delete(delete_comment))
+        .at("/api/tickets/:id/relations", get(list_relations).post(create_relation))
+        .at("/api/relations/:id", delete(delete_relation))
+        .at("/api/tickets/:id/time_entries", get(list_time_entries).post(create_time_entry))
+        .at("/api/time_entries/:id", delete(delete_time_entry))
         .at("/api/projects/:id/wiki", get(list_wiki_pages).post(create_wiki_page))
         .at("/api/wiki/:id", get(get_wiki_page).put(update_wiki_page).delete(delete_wiki_page))
         .data(state)
@@ -1882,5 +2112,289 @@ mod handler_tests {
         assert_eq!(combined_array.len(), 1);
         assert_eq!(combined_array[0]["id"].as_u64().unwrap(), a2);
         let _ = a1;
+    }
+
+    /// トラッカー種別(Redmine機能ギャップ対応、2026-07-26追加)。作成時に
+    /// `tracker`を指定できること・省略時は`bug`既定であること・
+    /// `GET /api/tickets?tracker=...`での絞り込み・`PUT`での変更を確認する。
+    #[tokio::test]
+    async fn ticket_tracker_defaults_to_bug_is_filterable_and_updatable() {
+        let state = make_state("ticket-tracker", true).await;
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "tracker-proj" }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // trackerを省略すると既定でbug。
+        let default_ticket = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "no tracker specified", "description": "d", "project_id": project_id }))
+            .send()
+            .await;
+        default_ticket.assert_status(poem::http::StatusCode::CREATED);
+        let default_body: serde_json::Value = default_ticket.json().await.value().deserialize();
+        assert_eq!(default_body["tracker"].as_str().unwrap(), "bug");
+        let default_id = default_body["id"].as_u64().unwrap();
+
+        // 明示的にfeatureを指定して作成。
+        let feature_ticket = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "a feature", "description": "d", "project_id": project_id, "tracker": "feature" }))
+            .send()
+            .await;
+        feature_ticket.assert_status(poem::http::StatusCode::CREATED);
+        let feature_body: serde_json::Value = feature_ticket.json().await.value().deserialize();
+        assert_eq!(feature_body["tracker"].as_str().unwrap(), "feature");
+        let feature_id = feature_body["id"].as_u64().unwrap();
+
+        // tracker=featureで絞り込むと1件のみ。
+        let filtered = client.get("/api/tickets?tracker=feature").header("Authorization", format!("Bearer {admin}")).send().await;
+        filtered.assert_status_is_ok();
+        let filtered_body: serde_json::Value = filtered.json().await.value().deserialize();
+        let filtered_array = filtered_body.as_array().unwrap();
+        assert_eq!(filtered_array.len(), 1);
+        assert_eq!(filtered_array[0]["id"].as_u64().unwrap(), feature_id);
+
+        // PUTでtrackerをsupportへ変更できる。
+        let updated = client
+            .put(format!("/api/tickets/{default_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "tracker": "support" }))
+            .send()
+            .await;
+        updated.assert_status_is_ok();
+        let updated_body: serde_json::Value = updated.json().await.value().deserialize();
+        assert_eq!(updated_body["tracker"].as_str().unwrap(), "support");
+    }
+
+    /// 課題関連(`blocks`/`duplicates`/`precedes`)のライフサイクル: 作成・
+    /// 一覧(from/to双方の立場で見えること)・自己参照拒否・存在しない
+    /// `to_ticket_id`拒否・重複関連拒否・削除・権限ゲート(未ログイン401、
+    /// 無許可403)を一気通貫で確認する。
+    #[tokio::test]
+    async fn issue_relation_lifecycle_and_access_gating() {
+        let state = make_state("relation-lifecycle", true).await;
+        let data_root = state.data_root.clone();
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "relation-proj" }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        let mk_ticket = |title: &'static str| {
+            let client = &client;
+            let admin = &admin;
+            async move {
+                let created = client
+                    .post("/api/tickets")
+                    .header("Authorization", format!("Bearer {admin}"))
+                    .body_json(&serde_json::json!({ "title": title, "description": "d", "project_id": project_id }))
+                    .send()
+                    .await;
+                created.assert_status(poem::http::StatusCode::CREATED);
+                created.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap()
+            }
+        };
+        let blocker_id = mk_ticket("blocker").await;
+        let blocked_id = mk_ticket("blocked").await;
+
+        // 未ログインでの関連作成は401。
+        client
+            .post(format!("/api/tickets/{blocker_id}/relations"))
+            .body_json(&serde_json::json!({ "to_ticket_id": blocked_id, "kind": "blocks" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::UNAUTHORIZED);
+
+        // editが無い一般ユーザーは403。
+        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let stranger_session = stranger_state.auth.create_session("stranger@example.com");
+        let stranger_app = build_routes(stranger_state);
+        let stranger_client = TestClient::new(stranger_app);
+        stranger_client
+            .post(format!("/api/tickets/{blocker_id}/relations"))
+            .header("Authorization", format!("Bearer {stranger_session}"))
+            .body_json(&serde_json::json!({ "to_ticket_id": blocked_id, "kind": "blocks" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::FORBIDDEN);
+
+        // 自己参照は400。
+        client
+            .post(format!("/api/tickets/{blocker_id}/relations"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "to_ticket_id": blocker_id, "kind": "blocks" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // 存在しないto_ticket_idは400。
+        client
+            .post(format!("/api/tickets/{blocker_id}/relations"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "to_ticket_id": 999999, "kind": "blocks" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // 正常な関連作成。
+        let created = client
+            .post(format!("/api/tickets/{blocker_id}/relations"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "to_ticket_id": blocked_id, "kind": "blocks" }))
+            .send()
+            .await;
+        created.assert_status(poem::http::StatusCode::CREATED);
+        let relation_id = created.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 同じ組み合わせの再作成は重複として400。
+        client
+            .post(format!("/api/tickets/{blocker_id}/relations"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "to_ticket_id": blocked_id, "kind": "blocks" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // from側・to側どちらのチケットから見ても一覧に現れる。
+        let from_side = client.get(format!("/api/tickets/{blocker_id}/relations")).header("Authorization", format!("Bearer {admin}")).send().await;
+        from_side.assert_status_is_ok();
+        let from_side_body: serde_json::Value = from_side.json().await.value().deserialize();
+        assert_eq!(from_side_body.as_array().unwrap().len(), 1);
+
+        let to_side = client.get(format!("/api/tickets/{blocked_id}/relations")).header("Authorization", format!("Bearer {admin}")).send().await;
+        to_side.assert_status_is_ok();
+        let to_side_body: serde_json::Value = to_side.json().await.value().deserialize();
+        assert_eq!(to_side_body.as_array().unwrap().len(), 1);
+
+        // 削除。
+        client.delete(format!("/api/relations/{relation_id}")).header("Authorization", format!("Bearer {admin}")).send().await.assert_status_is_ok();
+        let after_delete = client.get(format!("/api/tickets/{blocker_id}/relations")).header("Authorization", format!("Bearer {admin}")).send().await;
+        after_delete.assert_status_is_ok();
+        let after_delete_body: serde_json::Value = after_delete.json().await.value().deserialize();
+        assert_eq!(after_delete_body.as_array().unwrap().len(), 0);
+    }
+
+    /// 作業時間記録のライフサイクル: 投稿・一覧・`hours`の範囲外拒否
+    /// (0以下・24超)・投稿者本人または管理者のみ削除可・権限ゲート
+    /// (未ログイン401、無許可403)を確認する。
+    #[tokio::test]
+    async fn time_entry_lifecycle_validates_hours_and_gates_deletion() {
+        let state = make_state("time-entry-lifecycle", true).await;
+        let data_root = state.data_root.clone();
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "time-proj" }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        let ticket = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "t", "description": "d", "project_id": project_id }))
+            .send()
+            .await;
+        ticket.assert_status(poem::http::StatusCode::CREATED);
+        let ticket_id = ticket.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 未ログインでの記録は401。
+        client
+            .post(format!("/api/tickets/{ticket_id}/time_entries"))
+            .body_json(&serde_json::json!({ "hours": 1.0, "activity": "Development", "spent_on": "2026-07-26" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::UNAUTHORIZED);
+
+        // editが無い一般ユーザーは403。
+        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let stranger_session = stranger_state.auth.create_session("stranger@example.com");
+        let stranger_app = build_routes(stranger_state);
+        let stranger_client = TestClient::new(stranger_app);
+        stranger_client
+            .post(format!("/api/tickets/{ticket_id}/time_entries"))
+            .header("Authorization", format!("Bearer {stranger_session}"))
+            .body_json(&serde_json::json!({ "hours": 1.0, "activity": "Development", "spent_on": "2026-07-26" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::FORBIDDEN);
+
+        // hours=0は400。
+        client
+            .post(format!("/api/tickets/{ticket_id}/time_entries"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "hours": 0.0, "activity": "Development", "spent_on": "2026-07-26" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // hours=25は400(24超過)。
+        client
+            .post(format!("/api/tickets/{ticket_id}/time_entries"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "hours": 25.0, "activity": "Development", "spent_on": "2026-07-26" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // 正常な記録作成(管理者本人として)。
+        let created = client
+            .post(format!("/api/tickets/{ticket_id}/time_entries"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "hours": 2.5, "activity": "Development", "comments": "fixed it", "spent_on": "2026-07-26" }))
+            .send()
+            .await;
+        created.assert_status(poem::http::StatusCode::CREATED);
+        let entry_id = created.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        let listed = client.get(format!("/api/tickets/{ticket_id}/time_entries")).header("Authorization", format!("Bearer {admin}")).send().await;
+        listed.assert_status_is_ok();
+        let listed_body: serde_json::Value = listed.json().await.value().deserialize();
+        assert_eq!(listed_body.as_array().unwrap().len(), 1);
+
+        // メンバー(editを持つ)による他人の記録削除は403(投稿者でも管理者でもない)。
+        let mut config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
+        config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true });
+        access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
+        let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let member_session = member_state.auth.create_session("member@example.com");
+        let member_app = build_routes(member_state);
+        let member_client = TestClient::new(member_app);
+        member_client
+            .delete(format!("/api/time_entries/{entry_id}"))
+            .header("Authorization", format!("Bearer {member_session}"))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::FORBIDDEN);
+
+        // 管理者による削除は成功。
+        client.delete(format!("/api/time_entries/{entry_id}")).header("Authorization", format!("Bearer {admin}")).send().await.assert_status_is_ok();
+        let after_delete = client.get(format!("/api/tickets/{ticket_id}/time_entries")).header("Authorization", format!("Bearer {admin}")).send().await;
+        after_delete.assert_status_is_ok();
+        let after_delete_body: serde_json::Value = after_delete.json().await.value().deserialize();
+        assert_eq!(after_delete_body.as_array().unwrap().len(), 0);
     }
 }
