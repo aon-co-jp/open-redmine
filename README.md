@@ -11,6 +11,9 @@ Rust+[poem](https://github.com/poem-web/poem)(RPoem)版。運用時はVPSレン�
 > ⚠️ v0.1.0時点ではチケット(Issue)・プロジェクトのCRUD・Wiki・コメントに加え、
 > トラッカー種別(Bug/Feature/Support/Task)・課題関連(blocks/duplicates/
 > precedes)・作業時間記録(time tracking)まで(2026-07-26追加)。
+> **2026-07-27追加**: チケットへの担当者(assignee)フィールド、
+> プロジェクトマネージャーロール(グローバル管理者以外もプロジェクト単位
+> でメンバー管理を行える権限、権限昇格は防止)。
 > Redmine全体の機能網羅率としてはまだ3割程度。詳細は`CLAUDE.md`参照。
 
 ## ブラウザGUI(`web/`、Rust→WebAssembly)
@@ -59,12 +62,12 @@ wasm-bindgen --target web --no-typescript --out-dir pkg target/wasm32-unknown-un
 | `GET /api/accounts` / `POST /api/accounts` | 登録アカウント一覧取得 / 追加(管理者のみ) |
 | `POST /api/accounts/request` | アカウント利用の自己申請(認証不要) |
 | `GET /api/accounts/requests` | 保留中の自己申請一覧(管理者のみ) |
-| `POST /api/accounts/requests/:id/decide` | 自己申請の承認/却下・プロジェクトへの閲覧/編集権限付与(管理者のみ) |
+| `POST /api/accounts/requests/:id/decide` | 自己申請の承認/却下・プロジェクトへの閲覧/編集/メンバー管理権限付与(グローバル管理者、または対象プロジェクトの`allow_manage_members`を持つプロジェクトマネージャー。メンバー管理権限自体の新規付与はグローバル管理者のみ、2026-07-27追加) |
 | `GET /api/projects` / `POST /api/projects` | プロジェクト一覧取得(認証不要) / 新規作成(管理者のみ、`parent_id`でサブプロジェクト化可能) |
 | `GET /api/projects/:id` / `PUT /api/projects/:id` / `DELETE /api/projects/:id` | プロジェクト詳細取得(認証不要) / 更新・削除(管理者のみ、`parent_id`変更は循環参照を拒否) |
 | `GET /api/projects/:id/children` | 直接の子プロジェクト一覧(認証不要) |
-| `GET /api/tickets` / `POST /api/tickets` | チケット一覧取得(アクセス権のあるプロジェクトのみ、`status`/`project_id`/`tracker`クエリパラメータで絞り込み可能) / 新規作成(実在する`project_id`が必要、`tracker`〈`bug`/`feature`/`support`/`task`、省略時`bug`〉、`start_date`/`due_date`/`done_ratio`はガントチャート用の任意フィールド) |
-| `GET /api/tickets/:id` / `PUT /api/tickets/:id` | チケット詳細取得 / 更新(ステータス・`tracker`・`start_date`/`due_date`/`done_ratio`の変更含む) |
+| `GET /api/tickets` / `POST /api/tickets` | チケット一覧取得(アクセス権のあるプロジェクトのみ、`status`/`project_id`/`tracker`/`assignee`クエリパラメータで絞り込み可能) / 新規作成(実在する`project_id`が必要、`tracker`〈`bug`/`feature`/`support`/`task`、省略時`bug`〉、`start_date`/`due_date`/`done_ratio`はガントチャート用の任意フィールド、`assignee`は登録済みアカウントのメールアドレスのみ指定可能) |
+| `GET /api/tickets/:id` / `PUT /api/tickets/:id` | チケット詳細取得 / 更新(ステータス・`tracker`・`start_date`/`due_date`/`done_ratio`・`assignee`〈担当者〉の変更含む) |
 | `GET /api/tickets/:id/comments` / `POST /api/tickets/:id/comments` | コメント一覧取得(閲覧権限が必要) / 投稿(編集権限が必要) |
 | `DELETE /api/comments/:id` | コメント削除(管理者または投稿者本人のみ) |
 | `GET /api/tickets/:id/relations` / `POST /api/tickets/:id/relations` | チケット間の関連(`blocks`/`duplicates`/`precedes`)一覧(from/to双方の立場で表示、閲覧権限が必要) / 新規作成(編集権限が必要、自己参照・存在しない相手・重複登録は`400`で拒否) |
@@ -98,20 +101,26 @@ Windows/Linuxのネイティブバイナリで動作する。**Android版でこ�
 `load`/`save`をこの`StorageBackend`トレイト経由に配線済み。
 
 - **`local`(既定)**: `LocalFsBackend`、実ファイルI/Oでテスト済み。
-- **`sftp`**: VPS/レンタルサーバー向け、`ssh2`crateベース。`read`/
-  `write`/`ensure_dir`本体を実装済みだが、**この環境には実SFTPサーバーが
-  無く、実ネットワーク越しの到達確認はまだ済んでいない**(正直な開示)。
+- **`sftp`**: VPS/レンタルサーバー向け、`ssh2`crateベース(`sftp`
+  feature有効時のみ)。`RSCHIKETTO_SFTP_HOST`/`RSCHIKETTO_SFTP_USER`等を
+  設定すると実際にこのバックエンドへルーティングされる(2026-07-27に
+  配線漏れを修正——以前は設定しても常に`LocalFsBackend`へ
+  フォールバックしていた)。**この環境には実SFTPサーバーが無く、実
+  ネットワーク越しの到達確認はまだ済んでいない**(到達不能ホストへの
+  接続失敗を間接的な証拠として使うテストのみ、正直な開示)。
 - **`gdrive`**: Googleドライブ向け、`reqwest`でREST APIを直叩き
-  (`files.list`名前検索→`files.get`ダウンロード、アップロード)を
-  実装済みだが、**実APIキーでの到達確認は未実施**(正直な開示)。
+  (`files.list`名前検索→`files.get`ダウンロード、アップロード)。
+  `RSCHIKETTO_GDRIVE_ACCESS_TOKEN`を設定すると実際にこのバックエンドへ
+  ルーティングされる(同じく2026-07-27に配線漏れを修正)。**実APIキーでの
+  到達確認は未実施**(正直な開示)。
 
-**上記の理由により、現時点で`RSCHIKETTO_STORAGE_BACKEND=sftp`/`gdrive`を
-指定しても、安全側の判断として自動的に`LocalFsBackend`にフォールバック
-する**(実ネットワーク到達確認が済むまでの暫定措置、`storage.rs`の
-`backend_from_env()`参照)。Googleドライブ等クラウドAPIの利用には
-ユーザー自身がOAuth2認証情報を取得する必要があり、このソフトウェア単体で
-完結する機能ではない。詳細・残作業は`CLAUDE.md`のHANDOFF節および
-`PORTING.md`参照。
+**`RSCHIKETTO_SFTP_HOST`/`RSCHIKETTO_GDRIVE_ACCESS_TOKEN`等の必須環境変数が
+未設定、または`sftp`は`sftp` feature無効でビルドされている場合のみ、
+安全側の判断として自動的に`LocalFsBackend`にフォールバックする**
+(`storage.rs`の`backend_from_env()`参照)。Googleドライブ等クラウドAPIの
+利用にはユーザー自身がOAuth2認証情報を取得する必要があり、このソフト
+ウェア単体で完結する機能ではない。詳細・残作業は`CLAUDE.md`のHANDOFF節
+および`PORTING.md`参照。
 
 ## インストール(ビルド済みバイナリ、インストーラー付き)
 
