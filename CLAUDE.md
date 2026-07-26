@@ -771,6 +771,76 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
     追加機能、(4) `aruaru-db`/PostgreSQL DUAL DB構成への移行、
     (5) コメントの編集(現状は投稿・削除のみ)。
 
+- **2026-07-26(続き) 前回HANDOFF(コミット`3a0711e`)で追加した
+  トラッカー種別・課題関連・作業時間記録の3バックエンド機能に、
+  `web/`(Rust→WASM)側のUIを追加**:
+  1. `web/index.html`: チケット作成フォームに`new-ticket-tracker`
+     セレクト(Bug/Feature/Support/Task、既存の英語(日本語)併記
+     パターンを踏襲)を追加。チケット詳細に`ticket-detail-tracker`
+     バッジ、`relation-list`(関連チケット一覧+`new-relation-target`/
+     `new-relation-kind`の追加フォーム)、`time-entry-list`
+     (作業時間記録一覧+合計時間表示+`new-time-entry-hours`/
+     `-activity`/`-spent-on`/`-comments`の追加フォーム)を追加。
+     いずれも既存の`section`/`badge`/44pxタップターゲットCSSを
+     そのまま流用(新規CSS追加なし)。
+  2. `web/src/lib.rs`: `wire_ticket_form`がトラッカー選択値を
+     `POST /api/tickets`に含めるよう変更。`load_tickets`が一覧に
+     トラッカーバッジを追加表示。`open_ticket`がトラッカーバッジ・
+     `load_relations`・`load_time_entries`を呼ぶよう拡張。
+     `wire_ticket_detail`に関連追加(`POST /api/tickets/:id/relations`)・
+     作業時間追加(`POST /api/tickets/:id/time_entries`)のボタン配線を
+     追加。`#[wasm_bindgen] pub fn delete_relation`/`delete_time_entry`
+     を新設し、`index.html`の`onclick`から直接呼べるようグローバル
+     公開(既存の`open_ticket`/`open_wiki_page`と同じパターン)。
+  3. **作業時間記録の削除権限UI(ユーザー指示「投稿者本人または管理者
+     のみ削除可能、既存の著者限定UIパターンを踏襲」への対応)**:
+     このコードベースには既存の「投稿者限定で削除ボタンを出し分ける」
+     UIパターンが無かった(コメント削除は`main.rs`側の権限チェックのみで
+     フロントは常にボタンを出していない設計)ため、新規に
+     `local_storage`の`rsred_session_email`とエントリの`author_email`を
+     比較して一致する場合のみ削除ボタンを描画する方式で実装した。
+     **正直な開示**: これは表示上の補助にすぎず、実際の許可判定は
+     引き続き`DELETE /api/time_entries/:id`のサーバー側チェック
+     (管理者または投稿者本人)が最終防衛として機能する
+     (フロント側のなりすまし表示回避は保証しない設計、既存の
+     セッション管理モデルと同水準)。
+  4. **検証(実バイナリ+curl/grep、型チェックのみでの完了報告はしない
+     既存方針を徹底)**: `cargo build --target wasm32-unknown-unknown
+     --release`成功(既存の`RequestInit`未使用`mut`警告1件のみ、新規
+     警告なし)。`wasm-bindgen --target web --out-dir pkg
+     target/wasm32-unknown-unknown/release/rs_red_web.wasm`成功、
+     `pkg/rs_red_web.js`に`delete_relation`/`delete_time_entry`の
+     エクスポートを確認。サーバー本体`cargo build --release`成功
+     (既存警告のみ)。実バイナリ起動
+     (`RSCHIKETTO_DATA_DIR`一時ディレクトリ、`RSCHIKETTO_PORT=8412`、
+     `RSCHIKETTO_ACCOUNTS_LOCKED=false`、SMTP未設定)し、
+     `curl http://127.0.0.1:8412/`→`grep`で`new-ticket-tracker`・
+     `new-relation-target`・`new-relation-kind`・`new-time-entry-hours`・
+     `new-time-entry-activity`・`ticket-detail-tracker`・
+     `add-relation-btn`・`add-time-entry-btn`・`relation-list`・
+     `time-entry-list`のIDが全て配信HTML中に存在することを確認。
+     同様に`Bug (バグ)`/`Feature (機能要望)`/`Support (サポート)`/
+     `Task (作業)`・`blocks (ブロックする)`/`duplicates (重複)`/
+     `precedes (先行する)`の英語(日本語)併記ラベルが実際に配信される
+     HTMLに含まれることを確認。`curl http://127.0.0.1:8412/pkg/rs_red_web.js`
+     →`grep`で`delete_relation`/`delete_time_entry`のJSグルーコードへの
+     出力を確認。`cargo test`(サーバー側、UI追加に伴うバックエンド
+     コード変更は無し)**66件全green**(既存件数のまま、回帰なし)。
+  5. **未対応(今回のスコープ外、正直な開示)**: 実SMTP環境が無いため
+     ブラウザ実機(Claude Browser pane等)でのOTPログイン→トラッカー
+     選択→関連追加→作業時間記録という一連のクリック操作E2Eは
+     今回も未検証——curl/grepによる配信HTML/JS内容の存在確認までに
+     留まる(既存の一貫した制約、正直に開示)。トラッカー・関連種別・
+     作業時間の一覧項目文言自体は英語(日本語)併記の対象外のまま
+     (2026-07-24 HANDOFFの既存方針「動的生成リスト項目は今回対象外」を
+     踏襲、静的HTMLシェル側のラベルのみ併記済み)。
+  - 次にすべきこと: (1) 実SMTP環境でのブラウザ実機フルE2E(トラッカー
+    選択・関連追加・作業時間記録のクリック操作を含む、既存の継続課題)、
+    (2) 動的生成リスト項目(関連・作業時間記録含む)の英語(日本語)
+    併記化検討、(3) 担当者(`assignee`)フィールドの追加、
+    (4) ロール権限管理の細分化、(5) ガントチャート・カレンダーの
+    GUI描画、(6) カスタムフィールド、(7) 保存済みカスタムクエリ。
+
 ## 同時並行開発の対象プロジェクト(2026-07-21、ユーザー指示・拡張版)
 
 `RS-Chiketto`・`RS-Blog`・`RS-EC`(この3プロジェクト自身、着手順は

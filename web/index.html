@@ -129,12 +129,20 @@
           <ul id="ticket-list"></ul>
           <input id="new-ticket-title" type="text" placeholder="Ticket title (チケット件名)" />
           <textarea id="new-ticket-description" placeholder="Description (詳細)" rows="3"></textarea>
+          <label for="new-ticket-tracker">Tracker (トラッカー)</label>
+          <select id="new-ticket-tracker">
+            <option value="bug">Bug (バグ)</option>
+            <option value="feature">Feature (機能要望)</option>
+            <option value="support">Support (サポート)</option>
+            <option value="task">Task (作業)</option>
+          </select>
           <button id="create-ticket-btn">Create ticket (チケット作成)</button>
           <p id="ticket-status" class="muted"></p>
         </section>
 
         <section id="ticket-detail" class="hidden">
           <h2 id="ticket-detail-title"></h2>
+          <span id="ticket-detail-tracker" class="badge"></span>
           <p id="ticket-detail-description"></p>
           <label for="ticket-status-select">Status (ステータス)</label>
           <input id="selected-ticket-id" type="hidden" value="" />
@@ -150,6 +158,28 @@
           <ul id="comment-list"></ul>
           <textarea id="new-comment-body" placeholder="Write a comment (コメントを入力)" rows="2"></textarea>
           <button id="post-comment-btn">Post comment (コメント投稿)</button>
+
+          <h3>Relations (関連チケット)</h3>
+          <ul id="relation-list"></ul>
+          <input id="new-relation-target" type="text" placeholder="Target ticket ID (対象チケットID)" inputmode="numeric" />
+          <label for="new-relation-kind">Relation type (関連の種類)</label>
+          <select id="new-relation-kind">
+            <option value="blocks">blocks (ブロックする)</option>
+            <option value="duplicates">duplicates (重複)</option>
+            <option value="precedes">precedes (先行する)</option>
+          </select>
+          <button id="add-relation-btn">Add relation (関連を追加)</button>
+          <p id="relation-status" class="muted"></p>
+
+          <h3>Time entries (作業時間記録)</h3>
+          <ul id="time-entry-list"></ul>
+          <p id="time-entry-total" class="muted"></p>
+          <input id="new-time-entry-hours" type="text" placeholder="Hours (作業時間、例: 1.5)" inputmode="decimal" />
+          <input id="new-time-entry-activity" type="text" placeholder="Activity (作業分類、例: Development)" />
+          <input id="new-time-entry-spent-on" type="text" placeholder="Date YYYY-MM-DD (作業日)" />
+          <textarea id="new-time-entry-comments" placeholder="Comment (コメント、任意)" rows="2"></textarea>
+          <button id="add-time-entry-btn">Log time (作業時間を記録)</button>
+          <p id="time-entry-status" class="muted"></p>
 
           <button id="close-ticket-detail-btn">Close (閉じる)</button>
         </section>
@@ -176,13 +206,15 @@
     </main>
 
     <script type="module">
-      import init, { select_project, open_ticket, open_wiki_page } from "./pkg/rs_red_web.js";
+      import init, { select_project, open_ticket, open_wiki_page, delete_relation, delete_time_entry } from "./pkg/rs_red_web.js";
       init().then(() => {
         // `onclick="select_project(...)"`(HTML属性内の素の関数呼び出し)
         // から呼べるよう、モジュールスコープのexportをグローバルへ橋渡しする。
         window.select_project = select_project;
         window.open_ticket = open_ticket;
         window.open_wiki_page = open_wiki_page;
+        window.delete_relation = delete_relation;
+        window.delete_time_entry = delete_time_entry;
       });
     </script>
   </body>
