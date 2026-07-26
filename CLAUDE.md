@@ -81,6 +81,58 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
 
 ## HANDOFF
 
+- **2026-07-27(続き) `backend_from_env`のSFTP/GDrive配線漏れを発見・修正
+  ——`StorageBackend`の実体到達確認(SETリポジトリ群の連携強化と並行して
+  進めていたopen-redmineの開発候補の1つ)**:
+  1. **発見した実バグ**: `SftpBackend`/`GDriveBackend`は`read`/`write`/
+     `ensure_dir`/`exists`の本体I/O自体は既に実装済み(`ssh2`/`reqwest`
+     経由の実通信コード)だったが、`storage::backend_from_env()`が
+     `"sftp"`/`"gdrive"`のいずれを指定しても常に`LocalFsBackend`へ
+     フォールバックしており、**環境変数でSFTP/GDriveを選択しても実際には
+     一度もそちらへルーティングされていなかった**(実装済みのバックエンドが
+     死んでいた配線漏れ)。
+  2. **修正**: `backend_from_env()`を書き換え、`"sftp"`(`sftp` feature
+     有効かつ`RSCHIKETTO_SFTP_HOST`/`RSCHIKETTO_SFTP_USER`設定時に
+     `SftpBackend`)・`"gdrive"`(`RSCHIKETTO_GDRIVE_ACCESS_TOKEN`設定時に
+     `GDriveBackend`)を実際に構築するようにした。feature無効・必須環境
+     変数欠如の場合は引き続き警告ログを出しつつ`LocalFsBackend`へ
+     フォールバックする(黙ってデータを失わない設計は維持)。
+  3. **新規テスト4件**: 実SFTPサーバー・実Googleドライブアカウントは
+     この環境に無いため、「実際にネットワーク接続/HTTPSリクエストを試みて
+     失敗する」ことを間接的な証拠として使う設計(`LocalFsBackend`なら
+     ローカルファイルI/Oのみで完結し到達不能なホストへの接続を試みることは
+     無いため、失敗すること自体が実際にSFTP/GDriveへルーティングされた
+     証拠になる)。到達不能ポート(:1)への`SftpBackend`接続失敗、
+     偽トークンでの`GDriveBackend`への実HTTPSリクエスト失敗(実際に
+     `googleapis.com`へ到達し401が返ることを確認)、両バックエンドとも
+     必須環境変数が無い場合に`LocalFsBackend`へのフォールバックが実際に
+     機能すること、を確認。**副産物として発見した既存の潜在的フレーキー
+     さ**: これらのテストが並行実行で同じプロセスグローバルな環境変数
+     (`RSCHIKETTO_STORAGE_BACKEND`等)を読み書きするため、実際に1回
+     `FAILED`(`backend_from_env_falls_back_to_local_when_gdrive_
+     requested_without_token`が別テストの`RSCHIKETTO_GDRIVE_ACCESS_TOKEN`
+     設定と競合)を再現・確認した上で、`env_test_lock()`
+     (`std::sync::Mutex<()>`)による排他ロックを導入し解消(既存の
+     `selected_backend_name_*`系テストにも同じロックを適用、同種の
+     潜在的フレーキーさを解消)。
+  4. **検証(実測)**: `cargo test`(sftp feature無し)69件・
+     `cargo test --features sftp`71件、いずれも全green。
+  5. **正直な開示**: (1) SFTP側は実インプロセスSSHサーバー(open-easy-web/
+     open-raid-zが採用した`russh`ベースのモック)は今回追加していない
+     ——`ssh2`(クライアント専用crate)を使う既存実装との整合を取る
+     テストサーバー実装コストが見合わないと判断し、「到達不能ホストへの
+     接続失敗」という間接検証に留めた。(2) GDrive側は実際に
+     `googleapis.com`への到達を確認したが、実アクセストークンでの
+     アップロード/ダウンロードの往復確認はしていない(認証失敗時点までの
+     経路検証)。(3) `GDriveBackend::ensure_dir`/`exists`は元々スタブの
+     まま(`Ok(())`/`false`を返すのみ)——今回のスコープは配線修正のみで、
+     この既存の制約自体には手を付けていない。
+  - 次にすべきこと: (1) `GDriveBackend::exists`/`ensure_dir`の実装
+    (現状スタブ)、(2) `russh`ベースのインプロセスSFTPサーバーでの
+    より厳密な結合テスト(実際にファイル内容の往復一致まで確認)、
+    (3) `web/`側UIのチケット担当者選択欄・ロール権限管理の細分化
+    (前エントリから継続する既知の次回候補)。
+
 - **2026-07-27 チケットに担当者(assignee)フィールドを追加——直前
   エントリの「次にすべきこと(2) 担当者(assignee)フィールド追加」に対応
   (ユーザー指示: SETリポジトリ群〈open-directx/open-cuda/aruaru-llm〉の
