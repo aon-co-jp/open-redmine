@@ -136,6 +136,8 @@
             <option value="support">Support (サポート)</option>
             <option value="task">Task (作業)</option>
           </select>
+          <label for="new-ticket-assignee">Assignee email, optional (担当者メールアドレス・任意)</label>
+          <input id="new-ticket-assignee" type="text" placeholder="e.g. dev@example.com" />
           <button id="create-ticket-btn">Create ticket (チケット作成)</button>
           <p id="ticket-status" class="muted"></p>
         </section>
@@ -143,6 +145,7 @@
         <section id="ticket-detail" class="hidden">
           <h2 id="ticket-detail-title"></h2>
           <span id="ticket-detail-tracker" class="badge"></span>
+          <span id="ticket-detail-assignee" class="badge">unassigned (未割当)</span>
           <p id="ticket-detail-description"></p>
           <label for="ticket-status-select">Status (ステータス)</label>
           <input id="selected-ticket-id" type="hidden" value="" />
@@ -152,6 +155,9 @@
             <option value="closed">closed</option>
           </select>
           <button id="update-status-btn">Update status (ステータス更新)</button>
+          <label for="new-assignee-input">Reassign to email (担当者を変更)</label>
+          <input id="new-assignee-input" type="text" placeholder="e.g. dev@example.com" />
+          <button id="update-assignee-btn">Update assignee (担当者更新)</button>
           <p id="ticket-detail-status" class="muted"></p>
 
           <h3>Comments (コメント)</h3>

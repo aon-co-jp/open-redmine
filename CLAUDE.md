@@ -81,6 +81,47 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
 
 ## HANDOFF
 
+- **2026-07-27(続き2) `web/`側ブラウザGUIにチケット担当者(assignee)の
+  選択・変更UIを追加——2つ前のエントリの「次にすべきこと(1) web/側UIの
+  担当者選択欄」に対応**:
+  1. **`web/index.html`**: チケット新規作成フォームに`new-ticket-assignee`
+     (任意入力のメールアドレス欄)を追加。チケット詳細パネルに
+     `ticket-detail-assignee`(現在の担当者表示、既定「unassigned
+     (未割当)」)と、`new-assignee-input`+`update-assignee-btn`
+     (担当者の付け替え)を追加。
+  2. **`web/src/lib.rs`**: `wire_ticket_form`で担当者欄が空でなければ
+     `POST /api/tickets`のJSONへ`assignee`を含める(空文字列を送って
+     サーバー側の「登録済みメールアドレスではない」400を誘発しない設計)。
+     `wire_ticket_detail`に`update-assignee-btn`のクリック配線を追加
+     (`PUT /api/tickets/:id`)。`open_ticket`で取得したチケットの
+     `assignee`を`ticket-detail-assignee`へ反映。チケット一覧の各行にも
+     担当者バッジを追加(`assignee`が無い場合はバッジ自体を出さない)。
+  3. **検証(実測、型チェックのみで完了と報告しない方針の徹底)**:
+     `cargo build --target wasm32-unknown-unknown`(dev/release両方)成功。
+     `wasm-bindgen` CLI(バージョン0.2.126、`Cargo.lock`記載の依存
+     バージョンと一致することを確認済み)で`web/pkg/`を実際に再生成
+     (`wasm-pack`はこの環境に無かったため、同等の手動手順で代替)。
+     実バイナリ(`target/debug/rs-chiketto.exe`)を`RSCHIKETTO_WEB_DIR`
+     (Windowsパス形式で指定——`/f/...`形式のgit-bashパスはネイティブ
+     Windowsバイナリには認識されないと判明、この点も学びとして記録)
+     付きで実際に起動し、Claude Code内蔵のBrowserツールで実際に
+     `http://127.0.0.1:8100/`を開いて`<title>RS-Red</title>`のGUI
+     シェルが返ることを確認。ブラウザのコンソールにエラーが無いこと、
+     `document.getElementById`で`new-ticket-assignee`/
+     `ticket-detail-assignee`(既定テキスト`"unassigned (未割当)"`)/
+     `new-assignee-input`/`update-assignee-btn`が実際にDOM上へレンダリング
+     されていることをJS実行で直接確認した。
+  4. **正直な開示**: OTPログインにはSMTP設定が必要で、この環境には実
+     SMTPサーバーが無いため、**実際にログインしてチケットを作成・
+     担当者を付け替えるという一気通貫のクリック操作までは確認していない**
+     ——確認できたのはDOM要素の存在・WASM初期化時のコンソールエラー無し
+     までに留まる(サーバー側のAPIレベルの担当者ロジック自体は前々回
+     エントリの`ticket_assignee_must_be_a_registered_account_and_is_
+     filterable`で実HTTPリクエストにより別途検証済み)。
+  - 次にすべきこと: (1) 実SMTP設定またはテスト用ログインバイパスを用意し、
+    ブラウザからの実クリック操作でのE2E確認、(2) ロール権限管理の細分化
+    (前々回エントリから継続する既知の次回候補)。
+
 - **2026-07-27(続き) `backend_from_env`のSFTP/GDrive配線漏れを発見・修正
   ——`StorageBackend`の実体到達確認(SETリポジトリ群の連携強化と並行して
   進めていたopen-redmineの開発候補の1つ)**:
