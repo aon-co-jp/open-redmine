@@ -1130,6 +1130,46 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
     同様の実クリックE2Eで一通り確認する(今回はプロジェクト選択→
     チケット作成の経路のみ実施)。
 
+## 関連作業・横串メモ(2026-07-28、どのリポジトリから再開しても迷わないための相互参照)
+
+2026-07-28のセッションでは、open-redmine・RS-Sync・runo.tokyo・
+open-easy-webの4リポジトリにまたがる作業を行った。同じ日付のHANDOFF
+エントリを各リポジトリに置いてある:
+[RS-Sync](https://github.com/aon-co-jp/RS-Sync/blob/main/CLAUDE.md)
+(open-giteaプロバイダの認証欠落バグ修正+本番をeasy-web.tokyoへ移設、
+最も大きな未着手事項〈実GitHub PATでのフルE2E〉あり)・
+[runo.tokyo](https://github.com/aon-co-jp/runo.tokyo/blob/main/CLAUDE.md)・
+[open-easy-web](https://github.com/aon-co-jp/open-easy-web/blob/main/CLAUDE.md)
+(VPS側WASM未反映が既知の残課題)。
+
+## HANDOFF追記(2026-07-28) runo.tokyoテナント削除+本番ページへのデモ案内リンク追加
+
+ユーザー指示「easy-web.tokyo/open-redmineの中でデモ用easy-web.tokyo/
+open-redmine/demoへの英語と日本語でリンクを貼って、runo.tokyo/open-redmine
+は削除して」への対応。
+
+1. **`runo.tokyo`側のテナントルーティングを削除**: `DELETE /admin/
+   tenants/runo.tokyo?path_prefix=/open-redmine`で`domains.toml`から
+   該当エントリを削除(バックエンドプロセス`open-redmine.service`
+   〈port 8100〉自体は無変更・無停止、`easy-web.tokyo/open-redmine`は
+   引き続き200)。`https://runo.tokyo/open-redmine/`が404を返すことを
+   確認済み。
+2. **`easy-web.tokyo/open-redmine/demo`テナントを新規登録**(現状は本番と
+   同一バックエンド`127.0.0.1:8100`へのエイリアス、独立したデモ専用
+   データセットではない)。
+3. **`web/index.html`にデモへの案内リンクを追加**(日本語・英語併記):
+   イントロ直下に「これは管理者向け本番環境です。デモ環境は
+   `/open-redmine/demo`」の一文を追加。この`web/index.html`は
+   `RSCHIKETTO_WEB_DIR`からランタイムに直接配信される設計(コンパイル
+   埋め込みではない)ため、VPS上で`git pull`するだけで再ビルド不要で
+   反映されることを確認済み。
+  - 次にすべきこと: (1) デモ環境の真のデータ分離(現状はエイリアスの
+    ままで、本番データがそのままデモにも見えてしまう——独立データが
+    必要な場合は別プロセス+別`RSCHIKETTO_DATA_DIR`が必要)、
+    (2) README.mdのタイトル・古い公開先表記(`RS-Red`/`runo.tokyo/RS-Red`)
+    は今回`open-redmine`/`easy-web.tokyo`へ修正済みだが、本文中の他の
+    旧称箇所は未点検。
+
 ## HANDOFF追記(2026-07-27続き) VPS本番へのバグ修正デプロイ
 
 前項の2件のバグ修正(BigInt型変換エラー・ID=0番兵値衝突)を本番
