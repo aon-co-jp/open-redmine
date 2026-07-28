@@ -1129,3 +1129,30 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
     (2) 他の画面(コメント投稿・関連追加・作業時間記録・Wiki編集)も
     同様の実クリックE2Eで一通り確認する(今回はプロジェクト選択→
     チケット作成の経路のみ実施)。
+
+## HANDOFF追記(2026-07-27続き) VPS本番へのバグ修正デプロイ
+
+前項の2件のバグ修正(BigInt型変換エラー・ID=0番兵値衝突)を本番
+(`easy-web.tokyo/open-redmine`・`runo.tokyo/open-redmine`、同一の
+`open-redmine.service`)へデプロイした。
+
+1. **発見**: VPS上の`/root/open-redmine`は`git pull`で多数の新規ファイル
+   (`web/`ディレクトリ全体・`time_entries.rs`・`wiki.rs`等)が
+   fast-forwardされるほど古い状態だった——つまり本番は今回のバグ修正
+   どころか、Wiki/作業時間記録等の機能自体もまだ反映されていなかった
+   可能性がある。
+2. `git pull`→`cargo build --release`(メインクレート)→
+   `cd web && cargo build --release --target wasm32-unknown-unknown`→
+   `wasm-bindgen`で`pkg/`再生成→`systemctl restart open-redmine.service`
+   の手順で反映。
+3. **検証**: `curl https://easy-web.tokyo/open-redmine/`
+   `https://easy-web.tokyo/open-redmine/pkg/rs_red_web.js`いずれも200。
+   実ブラウザで`https://easy-web.tokyo/open-redmine/`を開き、コンソール
+   エラー無しでページがロードされることを確認。**正直な開示**: 本番は
+   実SMTP(Gmail)を使うOTPログインのため、実メール受信箱を確認する
+   手段がこのセッションには無く、ログイン→プロジェクト作成→チケット
+   作成という実クリックE2Eの完全な本番検証はできなかった(ローカル
+   環境での`RSCHIKETTO_DEV_LOG_OTP`経由の完全E2Eは実施済み、上記参照)。
+  - 次にすべきこと: 実際に管理者メール(norukia.jp@gmail.com)でOTPを
+    受信し、本番環境でも同じ実クリックE2Eを行うこと(次回、メール
+    受信箱にアクセスできるセッションで実施)。
