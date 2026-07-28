@@ -1130,6 +1130,36 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
     同様の実クリックE2Eで一通り確認する(今回はプロジェクト選択→
     チケット作成の経路のみ実施)。
 
+## HANDOFF追記(2026-07-28続き) 実バグ発見・修正: ブラウザGUIの絶対パスfetchでOTP送信を含む全API呼び出しが到達不能だった
+
+ユーザー報告「https://easy-web.tokyo/open-redmine/ でe-mailにワンタイム
+パスワードを送る機能が実装されてません」への対応。
+
+1. **調査**: バックエンド`POST /api/auth/request-otp`を直接`curl`すると
+   実際に`200 otp sent`(実SMTP経由でGmailへ送信成功)が返ることを確認
+   ——バックエンド自体は正常。実際にClaude Browser paneで
+   `https://easy-web.tokyo/open-redmine/`を開き、「Send code」ボタンを
+   実クリックしてNetworkタブを確認したところ、`POST https://easy-web.
+   tokyo/api/auth/request-otp`(`/open-redmine`プレフィックス無し)→
+   `400`であることを発見——`web/src/lib.rs`の`api()`関数が絶対パス
+   `/api/...`で`fetch()`していたため、`/open-redmine`配下マウント時に
+   ブラウザが常にオリジン直下を叩いてしまっていた(open-gitea/RS-Syncが
+   過去に踏んだのと同種の罠、詳細は`PORTING.md`「0. パスプレフィックス
+   配下マウント時の絶対パスfetch罠」に記録)。
+2. **修正**: `const BASE_PATH: &str = "/open-redmine";`を新設し、
+   `api()`が`format!("{BASE_PATH}{path}")`で必ず前置するよう変更
+   (1箇所のみ、他に絶対パスfetchは無いことを確認済み)。
+3. **実機検証(修正前後、両方とも実クリック+Networkタブで確認)**:
+   修正前は`https://easy-web.tokyo/api/auth/request-otp`→`400`。
+   VPS側`git pull`→`cargo build --target wasm32-unknown-unknown
+   --release`→`wasm-bindgen`→`systemctl restart open-redmine.service`
+   で反映後、同じ実クリック操作で`https://easy-web.tokyo/open-redmine/
+   api/auth/request-otp`→`200`(正しいプレフィックス付き・実際に到達)
+   を確認した。
+  - 次にすべきこと: 実際にメールが届くかどうかは今回未確認(受信箱への
+    アクセス手段がこのセッションには無い、バックエンドが200を返す=
+    SMTP送信ロジックのOk分岐を通ったこと自体は確認済み)。
+
 ## 関連作業・横串メモ(2026-07-28、どのリポジトリから再開しても迷わないための相互参照)
 
 2026-07-28のセッションでは、open-redmine・RS-Sync・runo.tokyo・
