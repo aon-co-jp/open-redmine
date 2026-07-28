@@ -1087,3 +1087,45 @@ VPS上の作業パス: `/root/RS-Red`(2026-07-22改名、旧`/root/RS-Chiketto`�
 であり、基盤側の完成を待ってから3プロジェクトに着手するのではなく、
 実際に統合しながら並行して育て、エコシステム全体の完成度を高めていく
 方針とする。
+
+- **2026-07-27(続き5) 実クリックE2Eで発見した2件の重大な実バグを修正(ユーザー指示「web GUIの実クリック操作でのE2E確認」への対応)**:
+  1. **バグ1: `wasm-bindgen`のBigInt型変換エラーで、ほぼ全てのリスト
+     クリック操作が実ブラウザで機能していなかった**。`web/src/lib.rs`の
+     `select_project`/`open_ticket`/`delete_relation`/`delete_time_entry`/
+     `open_wiki_page`はいずれも`#[wasm_bindgen] pub fn ...(id: u64)`
+     だったが、`wasm-bindgen`は`u64`をJS側`BigInt`へ写像する一方、
+     `web/index.html`側で生成される`onclick="select_project({id})"`等の
+     インライン属性は通常のJS数値リテラル(`select_project(0)`、BigInt
+     リテラルの`0n`ではない)を埋め込んでいたため、実ブラウザで
+     クリックすると`TypeError: Cannot convert 0 to a BigInt`で握り
+     つぶされ、プロジェクト選択・チケット詳細表示・関連削除・作業時間
+     削除・Wikiページ表示が**実質的に何も起きない**状態だった。
+     `cargo test`はJS↔WASM呼び出し境界を経由しないため、この不具合は
+     一度も検出されていなかった。**修正**: 5関数すべての引数型を`u32`
+     (JS側は通常の`Number`)へ変更し、関数内部で`as u64`にキャストする
+     形にした(内部ロジック・API呼び出しは無変更)。
+  2. **バグ2: プロジェクトID/チケットID`0`を「未選択」の番兵値として
+     使っていたため、最初に作成したプロジェクト(ID=0、サーバー側
+     `next_id`は0から採番)を選択しても「未選択」と誤判定され、その
+     プロジェクトでは永久にチケット作成ができなかった**。`web/src/
+     lib.rs::current_project_id`/`current_ticket_id`を`u64`(0=未選択)
+     から`Option<u64>`(hidden inputが空文字列の場合のみ`None`)へ変更し、
+     11箇所の呼び出し元すべてを`if id == 0 { return }`から
+     `let Some(id) = current_X_id() else { return }`パターンへ書き換えた。
+  3. **発見の経緯**: 実際にClaude Browser paneで
+     `http://127.0.0.1:8199`を開き、ログイン→プロジェクト作成→
+     プロジェクト選択→チケット作成の実クリック操作を行ったところ、
+     両方のバグに実際に遭遇した(座標クリックが効かない場合はJS経由の
+     `.click()`で切り分け、`window.select_project(0)`を直接呼んで
+     `TypeError`を再現させ原因を特定)。
+  4. **検証**: `cargo build --target wasm32-unknown-unknown`(webクレート)
+     成功。修正後、同じ実クリック操作(ログイン→プロジェクト作成→
+     選択→チケット作成)を再度行い、`POST /api/tickets`が実際に
+     `201 Created`を返し、作成したチケットがUIのチケット一覧に
+     実際に表示されることを確認した。メインクレート`cargo test`
+     **76件全green**(回帰なし、今回の修正は`web/`クレート側のみ)。
+  - 次にすべきこと: (1) 本番(easy-web.tokyo/open-redmine・
+    runo.tokyo/open-redmine)へこの修正を反映するVPS再デプロイ、
+    (2) 他の画面(コメント投稿・関連追加・作業時間記録・Wiki編集)も
+    同様の実クリックE2Eで一通り確認する(今回はプロジェクト選択→
+    チケット作成の経路のみ実施)。
