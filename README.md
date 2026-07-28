@@ -1,6 +1,18 @@
-# RS-Red
+# open-redmine
 
-(旧名`RS-Chiketto`、2026-07-22に`RS-Red`へ改名。公開先: `https://runo.tokyo/RS-Red`)
+(旧名`RS-Chiketto`→2026-07-22に`RS-Red`→2026-07-27に`open-redmine`へ改名)
+
+## Deployment / 運用先
+
+- **Production/admin (本番/管理者用)**: <https://easy-web.tokyo/open-redmine/>
+- **Demo (デモ用)**: <https://easy-web.tokyo/open-redmine/demo> (honest
+  disclosure: currently an alias to the same backend as production, not an
+  isolated demo dataset / 正直な開示: 現状は本番と同一バックエンドを指す
+  エイリアスで、独立したデモ専用データはまだ無い)
+- The `runo.tokyo/open-redmine` tenant entry was removed 2026-07-28,
+  consolidating on easy-web.tokyo (same backend process, unaffected) /
+  `runo.tokyo/open-redmine`のテナント登録は2026-07-28に削除し、
+  easy-web.tokyoへ一本化した(バックエンドプロセス自体は同一・無停止)。
 
 **開発開始日: 2026-07-21**(このリポジトリのGitHub作成日)
 
