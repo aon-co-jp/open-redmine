@@ -156,6 +156,23 @@ cd rs-chiketto
 cargo build --release
 ```
 
+## 開発・検証時にSMTP無しでログインを試す(2026-07-27追記)
+
+通常、`POST /api/auth/request-otp`はSMTP設定(`RSCHIKETTO_SMTP_*`)が
+無いと503を返し、ログインフロー自体を試せない。実SMTPサーバーを
+用意していない開発・検証・デモ環境では、環境変数
+`RSCHIKETTO_DEV_LOG_OTP=true` を設定すると、OTPをメール送信する代わりに
+サーバーの標準エラー出力(ログ)へ表示するようになり、すぐにログインを
+試せる:
+
+```bash
+RSCHIKETTO_DEV_LOG_OTP=true cargo run --release
+# ログに "RSCHIKETTO_DEV_LOG_OTP: ... printing OTP for ... : 123456" のように出力される
+```
+
+**本番運用ではこのフラグを絶対に設定しないこと**(OTPが誰でも読める
+サーバーログに平文で出力されるため)。
+
 ## ライセンス
 
 Apache-2.0

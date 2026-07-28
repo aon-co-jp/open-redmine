@@ -1156,10 +1156,27 @@ async fn request_otp(state: Data<&AppState>, body: poem::web::Json<serde_json::V
             return Ok(Response::builder().status(poem::http::StatusCode::FORBIDDEN).body("email not registered"));
         }
     }
-    let Some(smtp) = state.smtp.clone() else {
+    // 2026-07-27追記(使いやすさ改善): SMTP未設定の開発・検証環境では
+    // 従来503を返すのみで、GUIを一切使い始められなかった(実SMTPサーバーが
+    // 無いと結合テストすら組めない、という外部監査で指摘された最重要の
+    // セットアップ障壁)。`RSCHIKETTO_DEV_LOG_OTP=true`を明示的に設定した
+    // 場合に限り、OTPをメール送信せず`tracing::warn!`でサーバーログへ
+    // 出力する開発用バイパスを用意する(既定は従来通りoff、本番誤爆防止)。
+    let dev_log_otp = std::env::var("RSCHIKETTO_DEV_LOG_OTP")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if state.smtp.is_none() && !dev_log_otp {
         return Ok(Response::builder().status(poem::http::StatusCode::SERVICE_UNAVAILABLE).body("SMTP not configured"));
-    };
+    }
     let auth::RequestOtpOutcome::Issued(code) = state.auth.request_otp(&email);
+    if state.smtp.is_none() && dev_log_otp {
+        tracing::warn!(
+            "RSCHIKETTO_DEV_LOG_OTP: SMTP not configured, printing OTP for {email} to server log \
+             instead of sending mail (DEV ONLY, never enable this in production): {code}"
+        );
+        return Ok(Response::builder().status(poem::http::StatusCode::OK).body("otp sent (dev mode: logged to server console, not emailed)"));
+    }
+    let smtp = state.smtp.clone().expect("checked above");
     match mail::send_otp(smtp, email, code).await {
         Ok(()) => Ok(Response::builder().status(poem::http::StatusCode::OK).body("otp sent")),
         Err(e) => {
@@ -1463,6 +1480,55 @@ mod handler_tests {
     /// せず直接`AuthStore`に発行させて得る(SMTP無し環境でもテスト可能)。
     fn admin_token(state: &AppState) -> String {
         state.auth.create_session(ADMIN_EMAIL)
+    }
+
+    /// `RSCHIKETTO_DEV_LOG_OTP`はプロセス全体のグローバル環境変数のため、
+    /// 並列実行される他のテストと競合しないようこのMutexで直列化する。
+    fn dev_log_otp_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[tokio::test]
+    async fn request_otp_without_smtp_returns_503_by_default() {
+        // 2026-07-27追記の回帰確認: 開発バイパスを明示していない場合、
+        // 従来通りSMTP未設定なら503を返す(本番での意図しないバイパスを
+        // 防ぐデフォルト動作)。
+        let _guard = dev_log_otp_env_lock().lock().unwrap();
+        std::env::remove_var("RSCHIKETTO_DEV_LOG_OTP");
+
+        let state = make_state("otp-503-default", true).await;
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let resp = client
+            .post("/api/auth/request-otp")
+            .body_json(&serde_json::json!({ "email": ADMIN_EMAIL }))
+            .send()
+            .await;
+        resp.assert_status(poem::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn request_otp_with_dev_log_otp_bypasses_smtp_requirement() {
+        // 2026-07-27追記: SMTP未設定でも`RSCHIKETTO_DEV_LOG_OTP=true`を
+        // 明示すれば200を返し、GUIをすぐ使い始められる(外部監査で指摘
+        // された最重要のセットアップ障壁の解消)。
+        let _guard = dev_log_otp_env_lock().lock().unwrap();
+        std::env::set_var("RSCHIKETTO_DEV_LOG_OTP", "true");
+
+        let state = make_state("otp-dev-bypass", true).await;
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let resp = client
+            .post("/api/auth/request-otp")
+            .body_json(&serde_json::json!({ "email": ADMIN_EMAIL }))
+            .send()
+            .await;
+        resp.assert_status_is_ok();
+
+        std::env::remove_var("RSCHIKETTO_DEV_LOG_OTP");
     }
 
     #[tokio::test]
