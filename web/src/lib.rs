@@ -18,6 +18,18 @@ use web_sys::{Document, Element, HtmlInputElement, HtmlSelectElement, HtmlTextAr
 const SESSION_KEY: &str = "rsred_session_token";
 const EMAIL_KEY: &str = "rsred_session_email";
 
+/// 2026-07-28追記(実バグ修正): このアプリは`easy-web.tokyo/open-redmine`
+/// (open-web-serverの「分身の術」テナントルーティング、`path_prefix`剥がし
+/// 転送)配下にマウントされているが、`api()`が絶対パス`/api/...`で
+/// `fetch()`していたため、ブラウザは常にオリジン直下(`easy-web.tokyo/
+/// api/...`)を叩いてしまい、OTP送信を含む全APIリクエストが実際には
+/// 到達不能だった(実クリック操作で`POST https://easy-web.tokyo/api/
+/// auth/request-otp`→400を確認して発見)。open-gitea/RS-Syncが同種の
+/// 問題で採用した「マウント先を固定のプレフィックス定数として持つ」
+/// 方式をここでも踏襲する。別の場所にマウントする場合はこの値を書き換える
+/// こと(複数マウント先の動的対応は今回のスコープ外、正直な開示)。
+const BASE_PATH: &str = "/open-redmine";
+
 fn window() -> web_sys::Window {
     web_sys::window().expect("no global window")
 }
@@ -120,7 +132,8 @@ async fn api(method: &str, path: &str, body: Option<String>) -> Result<(u16, Str
     if let Some(b) = &body {
         opts.set_body(&JsValue::from_str(b));
     }
-    let request = Request::new_with_str_and_init(path, &opts)?;
+    let url = format!("{BASE_PATH}{path}");
+    let request = Request::new_with_str_and_init(&url, &opts)?;
     request.headers().set("Content-Type", "application/json")?;
     if let Some(token) = session_token() {
         request.headers().set("Authorization", &format!("Bearer {token}"))?;
