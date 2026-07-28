@@ -80,14 +80,35 @@ fn session_token() -> Option<String> {
     local_storage().get_item(SESSION_KEY).ok().flatten()
 }
 
-/// 現在選択中のプロジェクトID(0=未選択)。
-fn current_project_id() -> u64 {
-    input_value("selected-project-id").parse().unwrap_or(0)
+/// 現在選択中のプロジェクトID。
+///
+/// **2026-07-27追記(実クリックE2Eで発見した実バグの修正)**: 以前は
+/// 「`0`=未選択」という番兵値方式だったが、サーバー側`ProjectStore::
+/// next_id`は`0`から採番されるため、**最初に作成したプロジェクト
+/// (ID=0)を選択しても「未選択」と誤判定され、そのプロジェクトでは
+/// 永久にチケットを作成できない**という実バグがあった(実ブラウザで
+/// 最初のプロジェクトを作ってすぐ試したことで発覚——`cargo test`は
+/// この番兵値の衝突を検出できない)。番兵値方式をやめ、hidden inputが
+/// 空文字列/パース不能な場合のみ`None`を返す`Option<u64>`方式に変更し、
+/// `0`という正当なIDと「未選択」を区別できるようにした。
+fn current_project_id() -> Option<u64> {
+    let raw = input_value("selected-project-id");
+    if raw.trim().is_empty() {
+        None
+    } else {
+        raw.parse().ok()
+    }
 }
 
-/// 現在開いているチケットID(0=未選択)。
-fn current_ticket_id() -> u64 {
-    input_value("selected-ticket-id").parse().unwrap_or(0)
+/// 現在開いているチケットID。`current_project_id`と同じ理由(2026-07-27
+/// 追記)で`0`を番兵値に使わない`Option<u64>`方式にした。
+fn current_ticket_id() -> Option<u64> {
+    let raw = input_value("selected-ticket-id");
+    if raw.trim().is_empty() {
+        None
+    } else {
+        raw.parse().ok()
+    }
 }
 
 /// `fetch()`の薄いラッパー。`Authorization: Bearer`はセッションがあれば
@@ -226,11 +247,10 @@ fn wire_project_form() {
 fn wire_ticket_form() {
     add_click("create-ticket-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let project_id = current_project_id();
-            if project_id == 0 {
+            let Some(project_id) = current_project_id() else {
                 set_text("ticket-status", "先にプロジェクトを選択してください。");
                 return;
-            }
+            };
             let title = input_value("new-ticket-title");
             let description = textarea_value("new-ticket-description");
             let tracker = select_value("new-ticket-tracker");
@@ -265,14 +285,13 @@ fn wire_ticket_form() {
 fn wire_ticket_detail() {
     add_click("update-status-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let ticket_id = current_ticket_id();
-            if ticket_id == 0 {
+            let Some(ticket_id) = current_ticket_id() else {
                 return;
-            }
+            };
             let status = select_value("ticket-status-select");
             let body = serde_json::json!({ "status": status }).to_string();
             match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
-                Ok((200, _)) => open_ticket(ticket_id),
+                Ok((200, _)) => open_ticket(ticket_id as u32),
                 Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("更新エラー({status_code}): {msg}")),
                 Err(_) => set_text("ticket-detail-status", "通信エラーが発生しました。"),
             }
@@ -281,10 +300,9 @@ fn wire_ticket_detail() {
 
     add_click("update-assignee-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let ticket_id = current_ticket_id();
-            if ticket_id == 0 {
+            let Some(ticket_id) = current_ticket_id() else {
                 return;
-            }
+            };
             let assignee = input_value("new-assignee-input");
             if assignee.trim().is_empty() {
                 return;
@@ -293,7 +311,7 @@ fn wire_ticket_detail() {
             match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
                 Ok((200, _)) => {
                     set_input_value("new-assignee-input", "");
-                    open_ticket(ticket_id);
+                    open_ticket(ticket_id as u32);
                 }
                 Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("担当者更新エラー({status_code}): {msg}")),
                 Err(_) => set_text("ticket-detail-status", "通信エラーが発生しました。"),
@@ -303,10 +321,9 @@ fn wire_ticket_detail() {
 
     add_click("post-comment-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let ticket_id = current_ticket_id();
-            if ticket_id == 0 {
+            let Some(ticket_id) = current_ticket_id() else {
                 return;
-            }
+            };
             let comment_body = textarea_value("new-comment-body");
             if comment_body.trim().is_empty() {
                 return;
@@ -325,10 +342,9 @@ fn wire_ticket_detail() {
 
     add_click("add-relation-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let ticket_id = current_ticket_id();
-            if ticket_id == 0 {
+            let Some(ticket_id) = current_ticket_id() else {
                 return;
-            }
+            };
             let target: u64 = match input_value("new-relation-target").trim().parse() {
                 Ok(v) => v,
                 Err(_) => {
@@ -352,10 +368,9 @@ fn wire_ticket_detail() {
 
     add_click("add-time-entry-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let ticket_id = current_ticket_id();
-            if ticket_id == 0 {
+            let Some(ticket_id) = current_ticket_id() else {
                 return;
-            }
+            };
             let hours: f64 = match input_value("new-time-entry-hours").trim().parse() {
                 Ok(v) => v,
                 Err(_) => {
@@ -395,21 +410,19 @@ fn wire_ticket_detail() {
 fn wire_wiki() {
     add_click("load-wiki-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let project_id = current_project_id();
-            if project_id == 0 {
+            let Some(project_id) = current_project_id() else {
                 set_text("wiki-status", "先にプロジェクトを選択してください。");
                 return;
-            }
+            };
             load_wiki_pages(project_id).await;
         });
     });
 
     add_click("create-wiki-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let project_id = current_project_id();
-            if project_id == 0 {
+            let Some(project_id) = current_project_id() else {
                 return;
-            }
+            };
             let slug = input_value("new-wiki-slug");
             let title = input_value("new-wiki-title");
             let body_text = textarea_value("new-wiki-body");
@@ -454,8 +467,19 @@ async fn load_projects() {
     set_html("project-list", &html);
 }
 
+/// **2026-07-27追記(実クリックE2Eで発見した実バグの修正)**: 引数は
+/// `u32`で受ける。理由——`wasm-bindgen`は`u64`をJS側`BigInt`へ写像するが、
+/// `web/index.html`側の`onclick="select_project({id})"`は通常のJS数値
+/// リテラル(例: `select_project(0)`、BigIntリテラルの`0n`ではない)を
+/// 埋め込んでいたため、実ブラウザでボタンをクリックすると
+/// `TypeError: Cannot convert 0 to a BigInt`で握りつぶされ、
+/// プロジェクト選択自体が一切機能していなかった(`cargo test`はJS↔WASMの
+/// 呼び出し境界を経由しないため、この種の不具合は検出できない——実際に
+/// ブラウザで実クリックして初めて発覚した)。`u32`ならJS側は通常の
+/// `Number`として渡せるため、この変換エラーが起きない。
 #[wasm_bindgen]
-pub fn select_project(project_id: u64) {
+pub fn select_project(project_id: u32) {
+    let project_id = project_id as u64;
     set_input_value("selected-project-id", &project_id.to_string());
     set_text("selected-project-label", &format!("選択中のプロジェクトID: {project_id}"));
     show("ticket-detail", false);
@@ -497,8 +521,11 @@ async fn load_tickets(project_id: u64) {
 
 /// チケット詳細を開く(詳細取得+コメント一覧取得)。JSの`onclick`から
 /// `#[wasm_bindgen]`経由で直接呼べるようにグローバル公開する。
+/// `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+/// `TypeError: Cannot convert 0 to a BigInt`の回避)。
 #[wasm_bindgen]
-pub fn open_ticket(ticket_id: u64) {
+pub fn open_ticket(ticket_id: u32) {
+    let ticket_id = ticket_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
         set_input_value("selected-ticket-id", &ticket_id.to_string());
         let Ok((200, text)) = api("GET", &format!("/api/tickets/{ticket_id}"), None).await else {
@@ -554,12 +581,18 @@ async fn load_relations(ticket_id: u64) {
 
 /// `web/index.html`の`onclick="delete_relation(...)"`から直接呼べるよう
 /// グローバル公開する(`open_ticket`/`open_wiki_page`と同じパターン)。
+/// `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+/// `TypeError: Cannot convert 0 to a BigInt`の回避)。
 #[wasm_bindgen]
-pub fn delete_relation(relation_id: u64) {
+pub fn delete_relation(relation_id: u32) {
+    let relation_id = relation_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
-        let ticket_id = current_ticket_id();
         match api("DELETE", &format!("/api/relations/{relation_id}"), None).await {
-            Ok((200, _)) => load_relations(ticket_id).await,
+            Ok((200, _)) => {
+                if let Some(ticket_id) = current_ticket_id() {
+                    load_relations(ticket_id).await;
+                }
+            }
             Ok((status_code, msg)) => set_text("relation-status", &format!("削除エラー({status_code}): {msg}")),
             Err(_) => set_text("relation-status", "通信エラーが発生しました。"),
         }
@@ -608,12 +641,18 @@ async fn load_time_entries(ticket_id: u64) {
 /// グローバル公開する。投稿者本人以外・非管理者が呼んだ場合はサーバー側が
 /// `403`を返し、そのままエラー表示する(表示上の抑制は`load_time_entries`
 /// 側で行うが、直接呼ばれた場合の最終防衛はサーバー側の権限チェック)。
+/// `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+/// `TypeError: Cannot convert 0 to a BigInt`の回避)。
 #[wasm_bindgen]
-pub fn delete_time_entry(entry_id: u64) {
+pub fn delete_time_entry(entry_id: u32) {
+    let entry_id = entry_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
-        let ticket_id = current_ticket_id();
         match api("DELETE", &format!("/api/time_entries/{entry_id}"), None).await {
-            Ok((200, _)) => load_time_entries(ticket_id).await,
+            Ok((200, _)) => {
+                if let Some(ticket_id) = current_ticket_id() {
+                    load_time_entries(ticket_id).await;
+                }
+            }
             Ok((status_code, msg)) => set_text("time-entry-status", &format!("削除エラー({status_code}): {msg}")),
             Err(_) => set_text("time-entry-status", "通信エラーが発生しました。"),
         }
@@ -660,8 +699,11 @@ async fn load_wiki_pages(project_id: u64) {
     set_text("wiki-status", "");
 }
 
+/// `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+/// `TypeError: Cannot convert 0 to a BigInt`の回避)。
 #[wasm_bindgen]
-pub fn open_wiki_page(page_id: u64) {
+pub fn open_wiki_page(page_id: u32) {
+    let page_id = page_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
         let Ok((200, text)) = api("GET", &format!("/api/wiki/{page_id}"), None).await else {
             return;
