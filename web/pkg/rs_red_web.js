@@ -3,7 +3,9 @@
 /**
  * `web/index.html`の`onclick="delete_relation(...)"`から直接呼べるよう
  * グローバル公開する(`open_ticket`/`open_wiki_page`と同じパターン)。
- * @param {bigint} relation_id
+ * `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+ * `TypeError: Cannot convert 0 to a BigInt`の回避)。
+ * @param {number} relation_id
  */
 export function delete_relation(relation_id) {
     wasm.delete_relation(relation_id);
@@ -14,7 +16,9 @@ export function delete_relation(relation_id) {
  * グローバル公開する。投稿者本人以外・非管理者が呼んだ場合はサーバー側が
  * `403`を返し、そのままエラー表示する(表示上の抑制は`load_time_entries`
  * 側で行うが、直接呼ばれた場合の最終防衛はサーバー側の権限チェック)。
- * @param {bigint} entry_id
+ * `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+ * `TypeError: Cannot convert 0 to a BigInt`の回避)。
+ * @param {number} entry_id
  */
 export function delete_time_entry(entry_id) {
     wasm.delete_time_entry(entry_id);
@@ -23,21 +27,35 @@ export function delete_time_entry(entry_id) {
 /**
  * チケット詳細を開く(詳細取得+コメント一覧取得)。JSの`onclick`から
  * `#[wasm_bindgen]`経由で直接呼べるようにグローバル公開する。
- * @param {bigint} ticket_id
+ * `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+ * `TypeError: Cannot convert 0 to a BigInt`の回避)。
+ * @param {number} ticket_id
  */
 export function open_ticket(ticket_id) {
     wasm.open_ticket(ticket_id);
 }
 
 /**
- * @param {bigint} page_id
+ * `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+ * `TypeError: Cannot convert 0 to a BigInt`の回避)。
+ * @param {number} page_id
  */
 export function open_wiki_page(page_id) {
     wasm.open_wiki_page(page_id);
 }
 
 /**
- * @param {bigint} project_id
+ * **2026-07-27追記(実クリックE2Eで発見した実バグの修正)**: 引数は
+ * `u32`で受ける。理由——`wasm-bindgen`は`u64`をJS側`BigInt`へ写像するが、
+ * `web/index.html`側の`onclick="select_project({id})"`は通常のJS数値
+ * リテラル(例: `select_project(0)`、BigIntリテラルの`0n`ではない)を
+ * 埋め込んでいたため、実ブラウザでボタンをクリックすると
+ * `TypeError: Cannot convert 0 to a BigInt`で握りつぶされ、
+ * プロジェクト選択自体が一切機能していなかった(`cargo test`はJS↔WASMの
+ * 呼び出し境界を経由しないため、この種の不具合は検出できない——実際に
+ * ブラウザで実クリックして初めて発覚した)。`u32`ならJS側は通常の
+ * `Number`として渡せるため、この変換エラーが起きない。
+ * @param {number} project_id
  */
 export function select_project(project_id) {
     wasm.select_project(project_id);

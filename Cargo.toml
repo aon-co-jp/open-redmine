@@ -11,7 +11,7 @@ name = "rs-chiketto"
 path = "src/main.rs"
 
 [dependencies]
-poem = { version = "3.1", features = ["test"] }
+poem = { version = "3.1", features = ["test", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 tracing = "0.1"

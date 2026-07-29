@@ -1,12 +1,12 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
-export const select_project: (a: bigint) => void;
+export const select_project: (a: number) => void;
 export const start: () => void;
-export const delete_relation: (a: bigint) => void;
-export const delete_time_entry: (a: bigint) => void;
-export const open_ticket: (a: bigint) => void;
-export const open_wiki_page: (a: bigint) => void;
+export const open_ticket: (a: number) => void;
+export const open_wiki_page: (a: number) => void;
+export const delete_relation: (a: number) => void;
+export const delete_time_entry: (a: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__h0420fbd9399d5376: (a: number, b: number, c: any) => [number, number];
 export const wasm_bindgen__convert__closures_____invoke__hb9cd8f1b0a40051a: (a: number, b: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;
