@@ -22,6 +22,7 @@
 
 mod access;
 mod accounts;
+mod attachments;
 mod auth;
 mod comments;
 mod ddns;
@@ -706,6 +707,153 @@ async fn delete_comment(req: &Request, PathExtractor(id): PathExtractor<u64>, st
     }
     store.comments.retain(|c| c.id != id);
     comments::save(&state.data_root, &store, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Response::builder().status(poem::http::StatusCode::OK).body("deleted"))
+}
+
+/// `POST /api/tickets/:id/attachments` — チケットへファイルを添付する。
+/// `multipart/form-data`で単一パート(フィールド名は問わない、最初に
+/// ファイル名を持つパートを採用)を受け取る。アクセス制御は
+/// `create_comment`と同じ(対象チケットが所属するプロジェクトへの
+/// `Need::Edit`権限が必要)。
+#[handler]
+async fn create_attachment(
+    req: &Request,
+    PathExtractor(ticket_id): PathExtractor<u64>,
+    state: Data<&AppState>,
+    mut multipart: poem::web::Multipart,
+) -> PoemResult<Response> {
+    let tickets = load_tickets(&state.data_root).await;
+    let Some(ticket) = tickets.tickets.iter().find(|t| t.id == ticket_id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
+    };
+    check_project_access(req, &state, ticket.project_id, access::Need::Edit).await?;
+    let Some(author_email) = session_email(req, &state) else {
+        return Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED));
+    };
+
+    let mut field = None;
+    while let Some(f) = multipart
+        .next_field()
+        .await
+        .map_err(|e| poem::Error::from_string(format!("invalid multipart body: {e}"), poem::http::StatusCode::BAD_REQUEST))?
+    {
+        if f.file_name().is_some() {
+            field = Some(f);
+            break;
+        }
+    }
+    let Some(field) = field else {
+        return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("no file part found in multipart body"));
+    };
+    let file_name = field.file_name().unwrap_or("file").to_string();
+    let content_type = field.content_type().unwrap_or("application/octet-stream").to_string();
+    let bytes = field
+        .bytes()
+        .await
+        .map_err(|e| poem::Error::from_string(format!("failed to read file body: {e}"), poem::http::StatusCode::BAD_REQUEST))?;
+
+    let mut store = attachments::load(&state.data_root, state.backend.as_ref()).await;
+    let id = store.next_id;
+    store.next_id += 1;
+    let attachment = attachments::Attachment {
+        id,
+        ticket_id,
+        author_email,
+        file_name: file_name.clone(),
+        content_type,
+        size_bytes: bytes.len() as u64,
+        created_at: project::now_rfc3339(),
+    };
+
+    let blob_path = attachments::attachment_blob_path(&state.data_root, id, &file_name);
+    state
+        .backend
+        .write(&blob_path.to_string_lossy(), &bytes)
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    store.attachments.push(attachment.clone());
+    attachments::save(&state.data_root, &store, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    Ok(Response::builder()
+        .status(poem::http::StatusCode::CREATED)
+        .content_type("application/json")
+        .body(serde_json::to_vec(&attachment).unwrap_or_default()))
+}
+
+/// `GET /api/tickets/:id/attachments` — チケットへの添付ファイル一覧
+/// (メタデータのみ、`Need::View`権限があれば閲覧可能)。
+#[handler]
+async fn list_attachments(req: &Request, PathExtractor(ticket_id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let tickets = load_tickets(&state.data_root).await;
+    let Some(ticket) = tickets.tickets.iter().find(|t| t.id == ticket_id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
+    };
+    check_project_access(req, &state, ticket.project_id, access::Need::View).await?;
+    let store = attachments::load(&state.data_root, state.backend.as_ref()).await;
+    let visible: Vec<&attachments::Attachment> = store.for_ticket(ticket_id);
+    Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&visible).unwrap_or_default()))
+}
+
+/// `GET /api/attachments/:id/download` — 添付ファイルの実体をダウンロード
+/// する。対象チケットが所属するプロジェクトへの`Need::View`権限が必要。
+#[handler]
+async fn download_attachment(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let store = attachments::load(&state.data_root, state.backend.as_ref()).await;
+    let Some(attachment) = store.find(id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("attachment not found"));
+    };
+    check_project_access(req, &state, {
+        let tickets = load_tickets(&state.data_root).await;
+        let Some(ticket) = tickets.tickets.iter().find(|t| t.id == attachment.ticket_id) else {
+            return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
+        };
+        ticket.project_id
+    }, access::Need::View).await?;
+
+    let blob_path = attachments::attachment_blob_path(&state.data_root, attachment.id, &attachment.file_name);
+    let bytes = state
+        .backend
+        .read(&blob_path.to_string_lossy())
+        .await
+        .map_err(|e| poem::Error::from_string(format!("failed to read attachment blob: {e}"), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    Ok(Response::builder()
+        .status(poem::http::StatusCode::OK)
+        .content_type(attachment.content_type.clone())
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{}\"", attachment.file_name.replace('"', "'")),
+        )
+        .body(bytes))
+}
+
+/// `DELETE /api/attachments/:id` — 添付ファイルのメタデータを削除する。
+/// 管理者、またはアップロードした本人のみ許可(`delete_comment`と同じ
+/// 方針)。**正直な開示**: `StorageBackend`にはまだ削除APIが無いため、
+/// このパスではメタデータ(一覧・ダウンロード可否)のみ削除し、
+/// 保存先(local/sftp/gdrive)上の実ファイルは残り続ける(v1の既知の制約、
+/// ディスク容量が問題になった場合に対応する)。
+#[handler]
+async fn delete_attachment(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let Some(email) = session_email(req, &state) else {
+        return Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED));
+    };
+    let mut store = attachments::load(&state.data_root, state.backend.as_ref()).await;
+    let Some(attachment) = store.find(id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("attachment not found"));
+    };
+    let is_admin = email == state.admin_email;
+    let is_author = attachment.author_email == email;
+    if !is_admin && !is_author {
+        return Err(poem::Error::from_string("only the uploader or an admin may delete this attachment", poem::http::StatusCode::FORBIDDEN));
+    }
+    store.attachments.retain(|a| a.id != id);
+    attachments::save(&state.data_root, &store, state.backend.as_ref())
         .await
         .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Response::builder().status(poem::http::StatusCode::OK).body("deleted"))
@@ -1408,6 +1556,9 @@ fn build_routes(state: AppState) -> impl poem::Endpoint {
         .at("/api/tickets/:id", get(get_ticket).put(update_ticket))
         .at("/api/tickets/:id/comments", get(list_comments).post(create_comment))
         .at("/api/comments/:id", delete(delete_comment))
+        .at("/api/tickets/:id/attachments", get(list_attachments).post(create_attachment))
+        .at("/api/attachments/:id/download", get(download_attachment))
+        .at("/api/attachments/:id", delete(delete_attachment))
         .at("/api/tickets/:id/relations", get(list_relations).post(create_relation))
         .at("/api/relations/:id", delete(delete_relation))
         .at("/api/tickets/:id/time_entries", get(list_time_entries).post(create_time_entry))
