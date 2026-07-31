@@ -684,10 +684,17 @@ async fn load_tickets(project_id: u64) {
     let Ok(tickets) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
         return;
     };
-    let project_tickets: Vec<serde_json::Value> = tickets
+    let mut project_tickets: Vec<serde_json::Value> = tickets
         .into_iter()
         .filter(|t| t.get("project_id").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) == project_id)
         .collect();
+    // Redmine本家の一覧既定ソート(更新日の新しい順)相当(2026-07-31追加)。
+    // `updated_at`はISO8601ライクな文字列のため文字列比較で降順ソートできる。
+    project_tickets.sort_by(|a, b| {
+        let a_updated = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        let b_updated = b.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        b_updated.cmp(a_updated)
+    });
     let mut html = String::new();
     for t in &project_tickets {
         let id = t.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -698,6 +705,7 @@ async fn load_tickets(project_id: u64) {
         let assignee = t.get("assignee").and_then(|v| v.as_str()).unwrap_or("-");
         let done_ratio = t.get("done_ratio").and_then(|v| v.as_u64()).unwrap_or(0);
         let due_date = t.get("due_date").and_then(|v| v.as_str()).unwrap_or("-");
+        let updated_at = t.get("updated_at").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("-");
         // 期限日が今日以前(既に期限切れ)の場合は赤字で強調する
         // (Redmine本家の「期限超過チケットの赤字表示」相当の視覚パターン)。
         let due_class = if due_date != "-" && is_overdue(due_date) { " class=\"due-soon\"" } else { "" };
@@ -711,13 +719,15 @@ async fn load_tickets(project_id: u64) {
                 <td>{assignee_html}</td>
                 <td><div class="done-ratio-cell"><div class="done-ratio-track"><div class="done-ratio-fill" style="width:{done_ratio}%;"></div></div><span>{done_ratio}%</span></div></td>
                 <td{due_class}>{due_date_html}</td>
+                <td class="muted">{updated_at_html}</td>
             </tr>"#,
             assignee_html = escape_html(assignee),
             due_date_html = escape_html(due_date),
+            updated_at_html = escape_html(updated_at),
         ));
     }
     if html.is_empty() {
-        html = "<tr><td colspan=\"8\" class=\"muted\">No tickets yet (チケットはまだありません)</td></tr>".to_string();
+        html = "<tr><td colspan=\"9\" class=\"muted\">No tickets yet (チケットはまだありません)</td></tr>".to_string();
     }
     set_html("ticket-list", &html);
     render_gantt_and_calendar(&project_tickets);
