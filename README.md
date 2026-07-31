@@ -65,6 +65,10 @@ wasm-bindgen --target web --no-typescript --out-dir pkg target/wasm32-unknown-un
 
 ## API エンドポイント
 
+Rustから実際に呼び出す具体例(reqwestベースのコード付き)は
+[RUST-API-GUIDE.md](RUST-API-GUIDE.md)([English](RUST-API-GUIDE-English.md))
+を参照してください。
+
 | メソッド / パス | 説明 |
 | --- | --- |
 | `GET /healthz` | ヘルスチェック |

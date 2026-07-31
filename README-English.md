@@ -36,6 +36,10 @@ wasm-bindgen --target web --no-typescript --out-dir pkg target/wasm32-unknown-un
 
 ## API Endpoints
 
+For a full Rust client guide with working `reqwest` code, see
+[RUST-API-GUIDE-English.md](RUST-API-GUIDE-English.md)
+([日本語版](RUST-API-GUIDE.md)).
+
 | Method / Path | Description |
 | --- | --- |
 | `GET /healthz` | Health check |
