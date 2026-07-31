@@ -125,6 +125,12 @@
       .status-in_progress { background: #d68910; }
       .status-resolved { background: #17a589; }
       .status-closed { background: #229954; }
+      .priority-tag { font-size: 0.78rem; font-weight: 500; }
+      .priority-low { color: var(--muted); }
+      .priority-normal { color: var(--fg); }
+      .priority-high { color: #d68910; font-weight: 600; }
+      .priority-urgent { color: #c0392b; font-weight: 700; }
+      .priority-immediate { color: #ffffff; background: #922b21; padding: 0.05rem 0.4rem; border-radius: 3px; font-weight: 700; }
       .done-ratio-cell { display: flex; align-items: center; gap: 0.4rem; }
       .done-ratio-track { flex: 1; height: 0.6rem; background: var(--border); border-radius: 3px; overflow: hidden; min-width: 3rem; }
       .done-ratio-fill { height: 100%; background: #2f5aa8; }
@@ -192,6 +198,7 @@
                 <tr>
                   <th>#</th>
                   <th>Tracker (トラッカー)</th>
+                  <th>Priority (優先度)</th>
                   <th>Status (ステータス)</th>
                   <th>Subject (件名)</th>
                   <th>Assignee (担当者)</th>
@@ -210,6 +217,14 @@
             <option value="feature">Feature (機能要望)</option>
             <option value="support">Support (サポート)</option>
             <option value="task">Task (作業)</option>
+          </select>
+          <label for="new-ticket-priority">Priority (優先度)</label>
+          <select id="new-ticket-priority">
+            <option value="low">Low (低め)</option>
+            <option value="normal" selected>Normal (通常)</option>
+            <option value="high">High (高め)</option>
+            <option value="urgent">Urgent (急いで)</option>
+            <option value="immediate">Immediate (即時)</option>
           </select>
           <label for="new-ticket-assignee">Assignee email, optional (担当者メールアドレス・任意)</label>
           <input id="new-ticket-assignee" type="text" placeholder="e.g. dev@example.com (例: dev@example.com)" />
@@ -244,6 +259,7 @@
         <section id="ticket-detail" class="hidden">
           <h2 id="ticket-detail-title"></h2>
           <span id="ticket-detail-tracker" class="badge"></span>
+          <span id="ticket-detail-priority" class="badge"></span>
           <span id="ticket-detail-assignee" class="badge">unassigned (未割当)</span>
           <p id="ticket-detail-description"></p>
           <label for="ticket-status-select">Status (ステータス)</label>
@@ -267,6 +283,14 @@
           <input id="edit-ticket-due-date" type="date" />
           <label for="edit-ticket-done-ratio">Progress %, 0-100 (進捗率)</label>
           <input id="edit-ticket-done-ratio" type="number" min="0" max="100" />
+          <label for="edit-ticket-priority">Priority (優先度)</label>
+          <select id="edit-ticket-priority">
+            <option value="low">Low (低め)</option>
+            <option value="normal">Normal (通常)</option>
+            <option value="high">High (高め)</option>
+            <option value="urgent">Urgent (急いで)</option>
+            <option value="immediate">Immediate (即時)</option>
+          </select>
           <button id="update-schedule-btn">Update schedule (予定・進捗を更新)</button>
           <p id="ticket-detail-status" class="muted"></p>
 
