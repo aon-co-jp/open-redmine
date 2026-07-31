@@ -30,6 +30,7 @@ mod mail;
 mod project;
 mod relations;
 mod rustjson;
+mod saved_queries;
 mod storage;
 mod time_entries;
 mod wiki;
@@ -139,6 +140,10 @@ struct CreateProjectRequest {
     /// 他のプロジェクト操作と同じ「管理者のみが構造を作れる」方針)。
     #[serde(default)]
     parent_id: Option<u64>,
+    /// このプロジェクト配下のチケットが持てるカスタムフィールド名一覧
+    /// (2026-07-31追加)。
+    #[serde(default)]
+    custom_field_defs: Vec<String>,
 }
 
 /// `POST /api/projects` — プロジェクトを新規作成する(管理者のみ、
@@ -166,6 +171,7 @@ async fn create_project(req: &Request, state: Data<&AppState>, body: poem::web::
         name: body.name.clone(),
         description: body.description.clone(),
         parent_id: body.parent_id,
+        custom_field_defs: body.custom_field_defs.clone(),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -207,6 +213,12 @@ struct UpdateProjectRequest {
     /// 二重`Option`パターン(既存コードに前例が無いため今回導入)。
     #[serde(default, deserialize_with = "deserialize_double_option")]
     parent_id: Option<Option<u64>>,
+    /// カスタムフィールド定義の置き換え(指定した場合のみ、`custom_fields`
+    /// を利用中のチケット側の既存値は削除しない——定義から外れたキーが
+    /// 残っても新規作成/更新時にバリデーションで弾かれるだけで、既存の
+    /// 値自体は保持される)。
+    #[serde(default)]
+    custom_field_defs: Option<Vec<String>>,
 }
 
 /// 二重`Option`のデシリアライズ補助: フィールド省略は`None`
@@ -258,6 +270,9 @@ async fn update_project(
     if let Some(new_parent) = body.parent_id {
         proj.parent_id = new_parent;
     }
+    if let Some(defs) = &body.custom_field_defs {
+        proj.custom_field_defs = defs.clone();
+    }
     proj.updated_at = project::now_rfc3339();
     let updated = proj.clone();
     project::save(&state.data_root, &store, state.backend.as_ref())
@@ -299,11 +314,15 @@ async fn delete_project(req: &Request, PathExtractor(id): PathExtractor<u64>, st
     Ok(Response::builder().status(poem::http::StatusCode::OK).body("deleted"))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum TicketStatus {
     Open,
     InProgress,
+    /// 作業自体は完了したが、報告者による確認前(Redmine本家の
+    /// 「解決」相当、2026-07-31追加)。`Closed`とは区別し、確認後に
+    /// 改めて`Closed`へ遷移させる運用を想定する。
+    Resolved,
     Closed,
 }
 
@@ -358,6 +377,13 @@ struct Ticket {
     /// 「登録済みアカウントかどうか」までを検証範囲とする——正直な開示。
     #[serde(default)]
     assignee: Option<String>,
+    /// カスタムフィールド(Redmine機能ギャップ対応、2026-07-31追加)。
+    /// キーは所属プロジェクトの`Project::custom_field_defs`に含まれる
+    /// フィールド名でなければならない(ハンドラ側で`400`拒否)。値は
+    /// 自由入力の文字列のみ(Redmine本家のような型指定〈数値/真偽値/
+    /// リスト/日付〉別バリデーションは対象外、正直な開示)。
+    #[serde(default)]
+    custom_fields: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -398,6 +424,10 @@ struct CreateTicketRequest {
     done_ratio: Option<u8>,
     #[serde(default)]
     assignee: Option<String>,
+    /// カスタムフィールドの値(キーは所属プロジェクトの
+    /// `custom_field_defs`に含まれていなければならない、2026-07-31追加)。
+    #[serde(default)]
+    custom_fields: std::collections::HashMap<String, String>,
 }
 
 fn done_ratio_out_of_range(ratio: u8) -> bool {
@@ -410,14 +440,24 @@ fn assignee_email_is_valid(email: &str, accounts: &accounts::AccountStore, admin
     email == admin_email || accounts.emails.contains(email)
 }
 
+/// `fields`の全キーが`allowed`(プロジェクトの`custom_field_defs`)に
+/// 含まれているかを確認する。未定義のキーが1つでもあれば`false`
+/// (呼び出し側で`400`として拒否する)。
+fn custom_fields_are_defined(fields: &std::collections::HashMap<String, String>, allowed: &[String]) -> bool {
+    fields.keys().all(|k| allowed.iter().any(|a| a == k))
+}
+
 /// `POST /api/tickets` — チケットを新規作成する。所属`project_id`への
 /// `Need::Edit`権限が必要(管理者は常に許可、`access.rs`参照)。
 /// `project_id`が実在しない場合は`400`で拒否する。
 #[handler]
 async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::Json<CreateTicketRequest>) -> PoemResult<Response> {
     let projects = project::load(&state.data_root, state.backend.as_ref()).await;
-    if !projects.exists(body.project_id) {
+    let Some(project) = projects.find(body.project_id) else {
         return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("project_id does not refer to an existing project"));
+    };
+    if !custom_fields_are_defined(&body.custom_fields, &project.custom_field_defs) {
+        return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("custom_fields contains a key not defined on the project (see Project.custom_field_defs)"));
     }
     check_project_access(req, &state, body.project_id, access::Need::Edit).await?;
     if body.title.trim().is_empty() {
@@ -447,6 +487,7 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
         due_date: body.due_date.clone(),
         done_ratio,
         assignee: body.assignee.clone(),
+        custom_fields: body.custom_fields.clone(),
     };
     store.tickets.push(ticket.clone());
     save_tickets(&state.data_root, &store)
@@ -466,15 +507,11 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
 /// `assignee`(メールアドレス完全一致)で絞り込み可能(Redmine機能ギャップ
 /// 対応、2026-07-23追加。`assignee`は2026-07-27にチケットへ担当者
 /// フィールドを追加した際にあわせて対応)。
-#[handler]
-async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Response> {
-    let email = session_email(req, &state);
-    let is_admin = email.as_deref() == Some(state.admin_email.as_str());
-    // クエリ文字列を自前でパース(`url`クレートへの新規依存を避けるため、
-    // 値に`%XX`エンコードが必要な入力〈`status`/`project_id`は英数字のみ
-    // 想定〉は今回サポートしない——正直な開示)。
-    let query: std::collections::HashMap<String, String> = req
-        .uri()
+/// クエリ文字列を自前でパースする(`url`クレートへの新規依存を避けるため、
+/// 値に`%XX`エンコードが必要な入力〈`status`/`project_id`は英数字のみ
+/// 想定〉は今回サポートしない——正直な開示)。
+fn parse_query_string(req: &Request) -> std::collections::HashMap<String, String> {
+    req.uri()
         .query()
         .map(|q| {
             q.split('&')
@@ -486,28 +523,46 @@ async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Respo
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    let status_filter: Option<TicketStatus> = query.get("status").and_then(|s| match s.as_str() {
+        .unwrap_or_default()
+}
+
+fn parse_ticket_status(s: &str) -> Option<TicketStatus> {
+    match s {
         "open" => Some(TicketStatus::Open),
         "in_progress" => Some(TicketStatus::InProgress),
+        "resolved" => Some(TicketStatus::Resolved),
         "closed" => Some(TicketStatus::Closed),
         _ => None,
-    });
-    let project_filter: Option<u64> = query.get("project_id").and_then(|s| s.parse().ok());
-    let tracker_filter: Option<Tracker> = query.get("tracker").and_then(|s| match s.as_str() {
+    }
+}
+
+fn parse_tracker(s: &str) -> Option<Tracker> {
+    match s {
         "bug" => Some(Tracker::Bug),
         "feature" => Some(Tracker::Feature),
         "support" => Some(Tracker::Support),
         "task" => Some(Tracker::Task),
         _ => None,
-    });
-    let assignee_filter: Option<&String> = query.get("assignee");
+    }
+}
+
+/// `list_tickets`(クエリパラメータ経由)と`run_saved_query`(保存済み
+/// フィルタ経由)の両方から共有される絞り込み+アクセス制御ロジック
+/// (2026-07-31、保存済みクエリ機能追加時に`list_tickets`から抽出)。
+async fn filter_visible_tickets(
+    state: &AppState,
+    email: Option<&str>,
+    is_admin: bool,
+    status_filter: Option<TicketStatus>,
+    project_filter: Option<u64>,
+    tracker_filter: Option<Tracker>,
+    assignee_filter: Option<&str>,
+) -> Vec<Ticket> {
     let store = load_tickets(&state.data_root).await;
     let mut visible = Vec::new();
     for ticket in &store.tickets {
         if let Some(want) = &status_filter {
-            if !matches!((want, &ticket.status), (TicketStatus::Open, TicketStatus::Open) | (TicketStatus::InProgress, TicketStatus::InProgress) | (TicketStatus::Closed, TicketStatus::Closed))
-            {
+            if want != &ticket.status {
                 continue;
             }
         }
@@ -522,7 +577,7 @@ async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Respo
             }
         }
         if let Some(want) = assignee_filter {
-            if ticket.assignee.as_deref() != Some(want.as_str()) {
+            if ticket.assignee.as_deref() != Some(want) {
                 continue;
             }
         }
@@ -531,10 +586,31 @@ async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Respo
             continue;
         }
         let config = access::load(&state.data_root, ticket.project_id, state.backend.as_ref()).await;
-        if access::is_allowed(&config, access::Need::View, email.as_deref()) {
+        if access::is_allowed(&config, access::Need::View, email) {
             visible.push(ticket.clone());
         }
     }
+    visible
+}
+
+/// `GET /api/tickets` — チケット一覧。各チケットは所属`project`への
+/// `Need::View`権限がある場合のみ結果に含める(管理者は全件、
+/// 未ログインは基本的に空配列——`RGit`と同じprivate既定の考え方)。
+/// クエリパラメータ`status`(`open`/`in_progress`/`closed`)・
+/// `project_id`(数値)・`tracker`(`bug`/`feature`/`support`/`task`)・
+/// `assignee`(メールアドレス完全一致)で絞り込み可能(Redmine機能ギャップ
+/// 対応、2026-07-23追加。`assignee`は2026-07-27にチケットへ担当者
+/// フィールドを追加した際にあわせて対応)。
+#[handler]
+async fn list_tickets(req: &Request, state: Data<&AppState>) -> PoemResult<Response> {
+    let email = session_email(req, &state);
+    let is_admin = email.as_deref() == Some(state.admin_email.as_str());
+    let query = parse_query_string(req);
+    let status_filter = query.get("status").and_then(|s| parse_ticket_status(s));
+    let project_filter: Option<u64> = query.get("project_id").and_then(|s| s.parse().ok());
+    let tracker_filter = query.get("tracker").and_then(|s| parse_tracker(s));
+    let assignee_filter: Option<&str> = query.get("assignee").map(|s| s.as_str());
+    let visible = filter_visible_tickets(&state, email.as_deref(), is_admin, status_filter, project_filter, tracker_filter, assignee_filter).await;
     Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&visible).unwrap_or_default()))
 }
 
@@ -568,6 +644,10 @@ struct UpdateTicketRequest {
     done_ratio: Option<u8>,
     #[serde(default)]
     assignee: Option<String>,
+    /// カスタムフィールドの値を置き換える(指定した場合のみ、キーは
+    /// 所属プロジェクトの`custom_field_defs`に含まれていなければ`400`)。
+    #[serde(default)]
+    custom_fields: Option<std::collections::HashMap<String, String>>,
 }
 
 /// `PUT /api/tickets/:id` — チケットのタイトル・説明・ステータスを更新する
@@ -588,6 +668,13 @@ async fn update_ticket(
         let accounts = accounts::load(&state.data_root, state.backend.as_ref()).await;
         if !assignee_email_is_valid(assignee, &accounts, &state.admin_email) {
             return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("assignee must be a registered account email"));
+        }
+    }
+    if let Some(fields) = &body.custom_fields {
+        let projects = project::load(&state.data_root, state.backend.as_ref()).await;
+        let allowed = projects.find(existing.project_id).map(|p| p.custom_field_defs.clone()).unwrap_or_default();
+        if !custom_fields_are_defined(fields, &allowed) {
+            return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("custom_fields contains a key not defined on the project (see Project.custom_field_defs)"));
         }
     }
     let mut store = store_preview;
@@ -620,6 +707,9 @@ async fn update_ticket(
     }
     if let Some(assignee) = &body.assignee {
         ticket.assignee = Some(assignee.clone());
+    }
+    if let Some(fields) = &body.custom_fields {
+        ticket.custom_fields = fields.clone();
     }
     let updated = ticket.clone();
     save_tickets(&state.data_root, &store)
@@ -1457,6 +1547,13 @@ struct DecideAccessRequestPayload {
     allow_manage_members: bool,
     #[serde(default)]
     project_id: Option<u64>,
+    /// 名前付きロールプリセット(`"manager"`/`"developer"`/`"reporter"`、
+    /// 2026-07-31追加)。指定された場合、上記の生フラグ
+    /// (`allow_view`/`allow_edit`/`allow_manage_members`)より優先される
+    /// (プリセットが実際に展開する権限をそのまま使う)。未知のロール名は
+    /// `400`で拒否する。
+    #[serde(default)]
+    role: Option<String>,
 }
 
 /// `POST /api/accounts/requests/:id/decide` — 申請を審査する。
@@ -1483,7 +1580,18 @@ async fn decide_access_request(
 ) -> PoemResult<Response> {
     let acting_email = require_admin_or_project_manager(req, &state, body.project_id).await?;
     let acting_is_global_admin = acting_email == state.admin_email;
-    if body.approve && body.allow_manage_members && !acting_is_global_admin {
+
+    // `role`が指定されていれば生フラグより優先し、プリセットが展開する
+    // 権限をそのまま使う(未知のロール名は`400`)。
+    let granted_permission = if let Some(role) = &body.role {
+        let Some(preset) = access::RolePreset::parse(role) else {
+            return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("unknown role (expected \"manager\", \"developer\", or \"reporter\")"));
+        };
+        preset.permissions()
+    } else {
+        access::AccountPermission { allow_view: body.allow_view, allow_edit: body.allow_edit, allow_manage_members: body.allow_manage_members }
+    };
+    if body.approve && granted_permission.allow_manage_members && !acting_is_global_admin {
         return Ok(Response::builder()
             .status(poem::http::StatusCode::FORBIDDEN)
             .body("only the administrator can grant member-management permission"));
@@ -1513,10 +1621,7 @@ async fn decide_access_request(
     if body.approve {
         if let Some(pid) = body.project_id {
             let mut config = access::load(&state.data_root, pid, state.backend.as_ref()).await;
-            config.accounts.insert(
-                request.email.clone(),
-                access::AccountPermission { allow_view: body.allow_view, allow_edit: body.allow_edit, allow_manage_members: body.allow_manage_members },
-            );
+            config.accounts.insert(request.email.clone(), granted_permission);
             access::save(&state.data_root, pid, &config, state.backend.as_ref())
                 .await
                 .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
@@ -1529,6 +1634,116 @@ async fn decide_access_request(
         }
     }
     Ok(Response::builder().status(poem::http::StatusCode::OK).body(if body.approve { "approved" } else { "denied" }))
+}
+
+#[derive(Deserialize)]
+struct CreateSavedQueryRequest {
+    name: String,
+    #[serde(default)]
+    project_id: Option<u64>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    tracker: Option<String>,
+    #[serde(default)]
+    assignee: Option<String>,
+}
+
+/// `POST /api/saved_queries` — `GET /api/tickets`と同じ絞り込み条件を
+/// 名前付きで保存する(ログイン必須、所有者は自分のみ)。
+#[handler]
+async fn create_saved_query(req: &Request, state: Data<&AppState>, body: poem::web::Json<CreateSavedQueryRequest>) -> PoemResult<Response> {
+    let Some(email) = session_email(req, &state) else {
+        return Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED));
+    };
+    if body.name.trim().is_empty() {
+        return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("name must not be empty"));
+    }
+    if let Some(s) = &body.status {
+        if parse_ticket_status(s).is_none() {
+            return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("status must be one of open, in_progress, closed"));
+        }
+    }
+    if let Some(t) = &body.tracker {
+        if parse_tracker(t).is_none() {
+            return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("tracker must be one of bug, feature, support, task"));
+        }
+    }
+    let mut store = saved_queries::load(&state.data_root, state.backend.as_ref()).await;
+    let id = store.next_id;
+    store.next_id += 1;
+    let query = saved_queries::SavedQuery {
+        id,
+        owner_email: email,
+        name: body.name.clone(),
+        project_id: body.project_id,
+        status: body.status.clone(),
+        tracker: body.tracker.clone(),
+        assignee: body.assignee.clone(),
+        created_at: project::now_rfc3339(),
+    };
+    store.queries.push(query.clone());
+    saved_queries::save(&state.data_root, &store, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Response::builder().status(poem::http::StatusCode::CREATED).content_type("application/json").body(serde_json::to_vec(&query).unwrap_or_default()))
+}
+
+/// `GET /api/saved_queries` — 自分が作成した保存済みクエリの一覧
+/// (ログイン必須、他人のクエリは見えない)。
+#[handler]
+async fn list_saved_queries(req: &Request, state: Data<&AppState>) -> PoemResult<Response> {
+    let Some(email) = session_email(req, &state) else {
+        return Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED));
+    };
+    let store = saved_queries::load(&state.data_root, state.backend.as_ref()).await;
+    let mine = store.owned_by(&email);
+    Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&mine).unwrap_or_default()))
+}
+
+/// `DELETE /api/saved_queries/:id` — 保存済みクエリを削除する
+/// (管理者または作成者本人のみ、コメント/作業時間記録の削除と同じ
+/// 権限モデル)。
+#[handler]
+async fn delete_saved_query(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let Some(email) = session_email(req, &state) else {
+        return Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED));
+    };
+    let mut store = saved_queries::load(&state.data_root, state.backend.as_ref()).await;
+    let Some(query) = store.find(id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("saved query not found"));
+    };
+    if query.owner_email != email && email != state.admin_email {
+        return Ok(Response::builder().status(poem::http::StatusCode::FORBIDDEN).body("only the owner or an administrator can delete this saved query"));
+    }
+    store.queries.retain(|q| q.id != id);
+    saved_queries::save(&state.data_root, &store, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Response::builder().status(poem::http::StatusCode::OK).body("deleted"))
+}
+
+/// `GET /api/saved_queries/:id/run` — 保存済みクエリを実行し、
+/// `GET /api/tickets`と同じアクセス制御を適用した結果を返す(所有者または
+/// 管理者のみ実行可能)。
+#[handler]
+async fn run_saved_query(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let Some(email) = session_email(req, &state) else {
+        return Err(poem::Error::from_string("login required", poem::http::StatusCode::UNAUTHORIZED));
+    };
+    let store = saved_queries::load(&state.data_root, state.backend.as_ref()).await;
+    let Some(query) = store.find(id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("saved query not found"));
+    };
+    let is_admin_caller = email == state.admin_email;
+    if query.owner_email != email && !is_admin_caller {
+        return Ok(Response::builder().status(poem::http::StatusCode::FORBIDDEN).body("only the owner or an administrator can run this saved query"));
+    }
+    let status_filter = query.status.as_deref().and_then(parse_ticket_status);
+    let tracker_filter = query.tracker.as_deref().and_then(parse_tracker);
+    let visible =
+        filter_visible_tickets(&state, Some(email.as_str()), is_admin_caller, status_filter, query.project_id, tracker_filter, query.assignee.as_deref()).await;
+    Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&visible).unwrap_or_default()))
 }
 
 fn env_data_dir() -> PathBuf {
@@ -1565,6 +1780,9 @@ fn build_routes(state: AppState) -> impl poem::Endpoint {
         .at("/api/time_entries/:id", delete(delete_time_entry))
         .at("/api/projects/:id/wiki", get(list_wiki_pages).post(create_wiki_page))
         .at("/api/wiki/:id", get(get_wiki_page).put(update_wiki_page).delete(delete_wiki_page))
+        .at("/api/saved_queries", get(list_saved_queries).post(create_saved_query))
+        .at("/api/saved_queries/:id", delete(delete_saved_query))
+        .at("/api/saved_queries/:id/run", get(run_saved_query))
         .data(state)
         .with(Tracing)
 }
@@ -2867,5 +3085,332 @@ mod handler_tests {
         after_delete.assert_status_is_ok();
         let after_delete_body: serde_json::Value = after_delete.json().await.value().deserialize();
         assert_eq!(after_delete_body.as_array().unwrap().len(), 0);
+    }
+
+    /// カスタムフィールド(2026-07-31追加): プロジェクトの`custom_field_defs`に
+    /// 定義したキーのみチケットに設定できること、未定義のキーは作成・更新
+    /// いずれも`400`で拒否されること、定義済みキーの値は往復して読めることを
+    /// 実HTTPリクエストで確認する。
+    #[tokio::test]
+    async fn ticket_custom_fields_must_be_defined_on_the_project() {
+        let state = make_state("custom-fields", false).await;
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "cf-proj", "custom_field_defs": ["severity", "customer"] }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 未定義のキーを含む作成は400。
+        let rejected = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "t", "description": "d", "project_id": project_id, "custom_fields": {"unknown_field": "x"} }))
+            .send()
+            .await;
+        rejected.assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // 定義済みキーのみの作成は成功し、値が往復する。
+        let created = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "t", "description": "d", "project_id": project_id, "custom_fields": {"severity": "high"} }))
+            .send()
+            .await;
+        created.assert_status(poem::http::StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json().await.value().deserialize();
+        let ticket_id = created_body["id"].as_u64().unwrap();
+        assert_eq!(created_body["custom_fields"]["severity"].as_str().unwrap(), "high");
+
+        // 更新時に未定義キーを渡すと400、既存のticketは変更されない。
+        let update_rejected = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "custom_fields": {"not_defined": "y"} }))
+            .send()
+            .await;
+        update_rejected.assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // 定義済みキーでの更新は成功する。
+        let updated = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "custom_fields": {"severity": "low", "customer": "acme"} }))
+            .send()
+            .await;
+        updated.assert_status_is_ok();
+        let updated_body: serde_json::Value = updated.json().await.value().deserialize();
+        assert_eq!(updated_body["custom_fields"]["severity"].as_str().unwrap(), "low");
+        assert_eq!(updated_body["custom_fields"]["customer"].as_str().unwrap(), "acme");
+    }
+
+    /// 名前付きロールプリセット(2026-07-31追加): `role: "developer"`を
+    /// 指定した承認が`allow_view`/`allow_edit`を実際に付与すること、
+    /// `role: "manager"`が`allow_manage_members`まで付与すること
+    /// (これはグローバル管理者による承認でのみ許可される既存の権限昇格
+    /// 防止ロジックと組み合わさる)、未知のロール名が`400`になることを
+    /// 実HTTPリクエストで確認する。
+    #[tokio::test]
+    async fn role_preset_expands_to_the_expected_permission_flags() {
+        let state = make_state("role-preset", false).await;
+        let data_root = state.data_root.clone();
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let project = client.post("/api/projects").header("Authorization", format!("Bearer {admin}")).body_json(&serde_json::json!({ "name": "role-proj" })).send().await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 自己申請のレスポンス自体はプレーンテキスト("request submitted")
+        // なので、発行された`request_id`は既存テストと同じく
+        // `accounts::AccountStore::pending_requests`を直接読んで取得する。
+        async fn latest_pending_request_id(data_root: &std::path::Path) -> String {
+            let store = accounts::load(data_root, &storage::LocalFsBackend).await;
+            store.pending_requests.last().expect("a pending request must exist").id.clone()
+        }
+
+        // developerロールでの承認申請 → allow_view/allow_edit=true、
+        // allow_manage_members=falseが実際に付与されることを、承認後の
+        // AccessConfigを直接読んで確認する(HTTPレスポンス自体は
+        // "approved"という文字列のみを返す設計のため)。
+        client
+            .post("/api/accounts/request")
+            .body_json(&serde_json::json!({ "email": "dev@example.com", "project_id": project_id }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::CREATED);
+        let request_id = latest_pending_request_id(&data_root).await;
+
+        client
+            .post(format!("/api/accounts/requests/{request_id}/decide"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "approve": true, "project_id": project_id, "role": "developer" }))
+            .send()
+            .await
+            .assert_status_is_ok();
+
+        let config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
+        let perm = config.accounts.get("dev@example.com").expect("developer role must have inserted an AccountPermission entry");
+        assert!(perm.allow_view, "developer role must grant allow_view");
+        assert!(perm.allow_edit, "developer role must grant allow_edit");
+        assert!(!perm.allow_manage_members, "developer role must NOT grant allow_manage_members");
+
+        // managerロールでの承認申請 → allow_manage_membersまで付与される
+        // (グローバル管理者による承認のため権限昇格チェックは通る)。
+        client
+            .post("/api/accounts/request")
+            .body_json(&serde_json::json!({ "email": "boss@example.com", "project_id": project_id }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::CREATED);
+        let manager_request_id = latest_pending_request_id(&data_root).await;
+        client
+            .post(format!("/api/accounts/requests/{manager_request_id}/decide"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "approve": true, "project_id": project_id, "role": "manager" }))
+            .send()
+            .await
+            .assert_status_is_ok();
+        let config2 = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
+        let manager_perm = config2.accounts.get("boss@example.com").expect("manager role must have inserted an AccountPermission entry");
+        assert!(manager_perm.allow_view && manager_perm.allow_edit && manager_perm.allow_manage_members, "manager role must grant all three flags");
+
+        // 未知のロール名は400。
+        client
+            .post("/api/accounts/request")
+            .body_json(&serde_json::json!({ "email": "someone@example.com", "project_id": project_id }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::CREATED);
+        let request2_id = latest_pending_request_id(&data_root).await;
+        let bad_role = client
+            .post(format!("/api/accounts/requests/{request2_id}/decide"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "approve": true, "project_id": project_id, "role": "superuser" }))
+            .send()
+            .await;
+        bad_role.assert_status(poem::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// 保存済みクエリ(2026-07-31追加): 作成→一覧(自分のもののみ)→実行
+    /// (`GET /api/tickets`と同じ絞り込み条件が適用される)→削除、を
+    /// 実HTTPリクエストで一気通貫に確認する。
+    #[tokio::test]
+    async fn saved_query_lifecycle_creates_lists_runs_and_deletes() {
+        let state = make_state("saved-queries", false).await;
+        let admin = admin_token(&state);
+        let stranger_token = state.auth.create_session("stranger@example.com");
+        let app = build_routes(state);
+        let client = TestClient::new(app);
+
+        let project = client.post("/api/projects").header("Authorization", format!("Bearer {admin}")).body_json(&serde_json::json!({ "name": "sq-proj" })).send().await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 未ログインでの保存済みクエリ作成は401。
+        client.post("/api/saved_queries").body_json(&serde_json::json!({ "name": "x" })).send().await.assert_status(poem::http::StatusCode::UNAUTHORIZED);
+
+        // open状態のチケットを1件・closed状態のチケットを1件作成。
+        let open_ticket = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "open one", "description": "d", "project_id": project_id }))
+            .send()
+            .await;
+        open_ticket.assert_status(poem::http::StatusCode::CREATED);
+
+        let closed_ticket = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "closed one", "description": "d", "project_id": project_id }))
+            .send()
+            .await;
+        closed_ticket.assert_status(poem::http::StatusCode::CREATED);
+        let closed_id = closed_ticket.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+        client
+            .put(format!("/api/tickets/{closed_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "status": "closed" }))
+            .send()
+            .await
+            .assert_status_is_ok();
+
+        // 「このプロジェクトのopenチケットのみ」を保存済みクエリとして保存。
+        let created = client
+            .post("/api/saved_queries")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "my open tickets", "project_id": project_id, "status": "open" }))
+            .send()
+            .await;
+        created.assert_status(poem::http::StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json().await.value().deserialize();
+        let query_id = created_body["id"].as_u64().unwrap();
+
+        // 一覧に1件反映される。
+        let listed = client.get("/api/saved_queries").header("Authorization", format!("Bearer {admin}")).send().await;
+        listed.assert_status_is_ok();
+        let listed_body: serde_json::Value = listed.json().await.value().deserialize();
+        assert_eq!(listed_body.as_array().unwrap().len(), 1);
+
+        // 実行するとopenチケットのみが返る(closedチケットは含まれない)。
+        let ran = client.get(format!("/api/saved_queries/{query_id}/run")).header("Authorization", format!("Bearer {admin}")).send().await;
+        ran.assert_status_is_ok();
+        let ran_body: serde_json::Value = ran.json().await.value().deserialize();
+        let titles: Vec<&str> = ran_body.as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, vec!["open one"]);
+
+        // 他人(strangerセッション)はこのクエリを一覧・実行できない
+        // (自分のクエリのみ見える設計)——一覧は空、実行は403。
+        let stranger_listed = client.get("/api/saved_queries").header("Authorization", format!("Bearer {stranger_token}")).send().await;
+        stranger_listed.assert_status_is_ok();
+        let stranger_listed_body: serde_json::Value = stranger_listed.json().await.value().deserialize();
+        assert_eq!(stranger_listed_body.as_array().unwrap().len(), 0, "a stranger must not see another user's saved queries");
+        client
+            .get(format!("/api/saved_queries/{query_id}/run"))
+            .header("Authorization", format!("Bearer {stranger_token}"))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::FORBIDDEN);
+
+        // 削除後は一覧から消え、実行も404になる。
+        client.delete(format!("/api/saved_queries/{query_id}")).header("Authorization", format!("Bearer {admin}")).send().await.assert_status_is_ok();
+        let after_delete = client.get("/api/saved_queries").header("Authorization", format!("Bearer {admin}")).send().await;
+        after_delete.assert_status_is_ok();
+        let after_delete_body: serde_json::Value = after_delete.json().await.value().deserialize();
+        assert_eq!(after_delete_body.as_array().unwrap().len(), 0);
+        client.get(format!("/api/saved_queries/{query_id}/run")).header("Authorization", format!("Bearer {admin}")).send().await.assert_status(poem::http::StatusCode::NOT_FOUND);
+    }
+
+    /// チケットが担当者へ割り振られ、`resolved`(解決・報告者確認待ち)
+    /// を経て`closed`(完了)へ遷移できることを確認する(Redmine本家の
+    /// ワークフロー〈New→In Progress→Resolved→Closed〉相当、2026-07-31追加)。
+    #[tokio::test]
+    async fn ticket_can_be_assigned_and_progress_through_resolved_to_closed() {
+        let state = make_state("ticket-assign-resolve", false).await;
+        let admin = admin_token(&state);
+        let data_root = state.data_root.clone();
+        let app = build_routes(state);
+        let client = poem::test::TestClient::new(app);
+
+        client
+            .post("/api/accounts")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "email": "dev@example.com" }))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::CREATED);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "assign-resolve" }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 作成時点で担当者を割り振れる。
+        let created = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "fix bug", "description": "d", "project_id": project_id, "assignee": "dev@example.com" }))
+            .send()
+            .await;
+        created.assert_status(poem::http::StatusCode::CREATED);
+        let ticket: serde_json::Value = created.json().await.value().deserialize();
+        assert_eq!(ticket["assignee"].as_str(), Some("dev@example.com"));
+        let ticket_id = ticket["id"].as_u64().unwrap();
+
+        // resolvedへ更新できる。
+        let resolved = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "status": "resolved" }))
+            .send()
+            .await;
+        resolved.assert_status_is_ok();
+        let resolved_ticket: serde_json::Value = resolved.json().await.value().deserialize();
+        assert_eq!(resolved_ticket["status"].as_str(), Some("resolved"));
+
+        // status=resolvedで絞り込める。
+        let filtered = client
+            .get(format!("/api/tickets?status=resolved&project_id={project_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .send()
+            .await;
+        filtered.assert_status_is_ok();
+        let filtered_body: serde_json::Value = filtered.json().await.value().deserialize();
+        assert_eq!(filtered_body.as_array().unwrap().len(), 1);
+
+        // 報告者確認後、closedへ最終遷移できる。
+        let closed = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "status": "closed" }))
+            .send()
+            .await;
+        closed.assert_status_is_ok();
+        let closed_ticket: serde_json::Value = closed.json().await.value().deserialize();
+        assert_eq!(closed_ticket["status"].as_str(), Some("closed"));
+
+        // 担当者の付け替えも引き続き可能(既存機能の回帰確認)。
+        let reassigned = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "assignee": "admin@example.com" }))
+            .send()
+            .await;
+        reassigned.assert_status_is_ok();
+        let reassigned_ticket: serde_json::Value = reassigned.json().await.value().deserialize();
+        assert_eq!(reassigned_ticket["assignee"].as_str(), Some("admin@example.com"));
+
+        let _ = data_root;
     }
 }

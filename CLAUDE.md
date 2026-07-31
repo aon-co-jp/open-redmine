@@ -82,6 +82,107 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-07-31 Redmine機能パリティ4点(カスタムフィールド・保存済みクエリ・
+  ガントチャート/カレンダーGUI・名前付きロールプリセット)を実装+
+  スケジュール/進捗率UIの新設+チケットのresolvedステータス追加+
+  英語(日本語)併記の徹底(ユーザー指示「本家のRedmineと違って対応して
+  いない機能は、Rust製のopen-redmineも対応させて」「Redmineのスケジュール
+  機能や何を何時間何分掛けて取り組んだかなどの記録も何%などの記録の
+  open-redmineは、詳細も見た目も同じ様に互換性を保って」「チケットは
+  担当者へ割り振られたり、解決したり完成した時などの処理も可能にして」
+  「全て英語と(日本語)のハイブリッド表記にして」)**:
+  1. **カスタムフィールド**: `Project`に`custom_field_defs: Vec<String>`
+     (許可するフィールド名一覧)、`Ticket`に`custom_fields:
+     HashMap<String,String>`(自由入力値、型検証は無し)を追加。
+     `custom_fields_are_defined()`で、チケット側のキーが所属プロジェクトの
+     `custom_field_defs`に含まれていない場合`400`で拒否する。
+  2. **保存済みクエリ**: `src/saved_queries.rs`を新設
+     (`SavedQuery{id,owner_email,name,project_id,status,tracker,
+     assignee,created_at}`)。`POST/GET /api/saved_queries`・
+     `DELETE /api/saved_queries/:id`・`GET /api/saved_queries/:id/run`
+     を追加。個人用のみ(プロジェクト共有クエリは対象外、正直な開示)。
+     `list_tickets`のフィルタ処理を`filter_visible_tickets()`として
+     共通関数に抽出し、`run_saved_query`と重複させない設計にした。
+  3. **名前付きロールプリセット**: `access::RolePreset`
+     (`Manager`=閲覧・編集・メンバー管理すべて許可、`Developer`=閲覧・
+     編集のみ、`Reporter`=閲覧のみ)を追加。既存の`AccountPermission`の
+     生フラグへの単なる展開であり、新しいデータモデルは導入していない。
+     `decide_access_request`が`role`文字列を受け付け、`RolePreset::
+     parse`で解決する。
+  4. **ガントチャート・カレンダーGUI**: `web/`(WASM)側に
+     Howard Hinnantの`days_from_civil`(エポックからの日数変換、うるう年
+     対応、新規crate依存なし)を実装し、`start_date`/`due_date`が両方ある
+     チケットを横棒グラフで(位置・幅をパーセンテージ計算)、`done_ratio`
+     を進捗オーバーレイ+`NN%`ラベルで表示。`due_date`があるチケットは
+     期限日順のカレンダー一覧にも表示(Redmine本家のような月表示グリッドは
+     対象外、正直な開示)。単体テスト4件
+     (`days_from_civil`のエポック基準・既知参照日・平年365日差分・
+     不正形式のNone、`cargo test`4/4 green)。
+  5. **スケジュール・進捗率の入力/編集UI**(前回まではAPIのみでweb側に
+     入力欄が無く、実質使えなかった実バグに近い状態だったための対応):
+     チケット新規作成フォームに開始日・期限日・進捗率(0-100)の入力欄を
+     追加。チケット詳細パネルに「Schedule & Progress」セクションを新設し、
+     現在値表示+編集フィールド+`Update schedule`ボタン
+     (`PUT /api/tickets/:id`)を追加。チケット一覧・ガントバーにも進捗%
+     バッジ表示を追加。
+  6. **チケットステータスに`resolved`(解決・報告者確認待ち)を追加**:
+     `TicketStatus`が`Open→InProgress→Resolved→Closed`(Redmine本家の
+     基本ワークフロー相当)になった。既存の`open`/`in_progress`/`closed`
+     はそのまま、`resolved`を新規追加(既存データとの後方互換は
+     `#[serde(rename_all snake_case)]`の追加バリアントのため無条件に保たれる)。
+     担当者への割り振り自体は既存機能(2026-07-27追加分)がそのまま使える
+     ことを新規テストで再確認した。
+  7. **英語(日本語)併記の徹底**: `web/index.html`の placeholder(例文・
+     書式表記)、`web/src/lib.rs`側の動的生成ステータス/エラーメッセージ
+     (通信エラー・ログイン失敗・各種更新/削除エラー・Wiki読み込み失敗等、
+     約20箇所)を英語(日本語)併記形式へ統一。2026-07-24 HANDOFFで
+     意図的に対象外としていた「動的生成の説明文・エラーメッセージ」も
+     今回は含めて併記化した(ユーザーの明示的な「全て」指示による方針変更)。
+  8. **検証(実測、型チェックのみで完了と報告しない方針の徹底)**:
+     - メインクレート`cargo test`: **81→82件、全green**(新規1件
+       `ticket_can_be_assigned_and_progress_through_resolved_to_closed`
+       ——担当者割り振り→resolvedへ更新→`status=resolved`フィルタ→
+       closedへ最終遷移→担当者再割り当て、を実HTTPリクエストで一気通貫に
+       確認)。既存81件も回帰なし。
+     - `web/`クレート`cargo test`: 4件全green(`days_from_civil`)。
+     - `web/`クレート`cargo build --target wasm32-unknown-unknown
+       --release`成功(既存の`RequestInit`未使用`mut`警告のみ、新規警告
+       なし)。`wasm-bindgen`で`pkg/`再生成し、追加した英語(日本語)併記
+       文字列が実際にコンパイル後の`.wasm`バイナリに含まれていることを
+       確認。
+     - 実バイナリを起動し(`RSCHIKETTO_DEV_LOG_OTP=true`の開発バイパス
+       経由)、実際のHTTPリクエストで: `resolved`ステータスの
+       `<option>`要素・スケジュール編集UI(`edit-ticket-start-date`等)・
+       `update-schedule-btn`が配信HTMLに実在すること、`POST /api/tickets`
+       で`start_date`/`due_date`/`done_ratio`を送ると実際に保存され
+       `GET /api/tickets`で正しく返ってくること(UIが送信するのと同じ
+       JSON形状で確認)、placeholder内の「例: ...」併記文言が実際に
+       配信されることを、`curl`で確認した。
+     - **正直な開示(未検証の範囲)**: このセッションの実行環境では
+       ブラウザ拡張の`fetch`計装がWASM側の`window.fetch`呼び出しを
+       別物に差し替えてしまい(ネットワーク監視用の instrumentation が
+       `Window.prototype.fetch`より優先される)、`BASE_PATH`固定の
+       `/open-redmine`プレフィックスをローカル環境でバイパスする一時
+       シムが機能しなかった。そのため今回は**実クリック操作でのブラウザ
+       E2E(ログイン→スケジュール入力→ガントチャート表示という一連の
+       操作)までは確認できておらず**、curl経由のAPI往復確認+配信HTML
+       内のDOM要素存在確認に留まる。次回、本番(`easy-web.tokyo/
+       open-redmine`、`/open-redmine`プレフィックス配下)またはこの
+       制約が無い環境で実クリックE2Eを行うこと。
+  9. **未対応(今回のスコープ外、正直な開示)**: (1) カスタムフィールドの
+     `web/`側UI(現状HTTP APIのみ)、(2) 保存済みクエリの`web/`側UI
+     (同上)、(3) 名前付きロールプリセットの`web/`側UI(同上)、
+     (4) ガントチャートの月表示グリッド(現状は単純な横棒+期限日一覧)、
+     (5) `resolved`遷移時の自動アクション(Redmine本家のような
+     ワークフロー遷移権限マトリクス・特定ロールのみ`resolved`→`closed`
+     可能、等)は無く、誰でも任意のステータス間を自由に遷移できる単純な
+     enumのまま。
+  - 次にすべきこと: (1) 本番(`easy-web.tokyo/open-redmine`)への今回の
+    デプロイ(`git pull`→`cargo build --release`→web側wasm再ビルド→
+    `systemctl restart`)、(2) 本番環境での実クリックE2E(上記(8)の
+    未検証範囲への対応)、(3) カスタムフィールド・保存済みクエリ・
+    ロールプリセットの`web/`側UI追加。
+
 - **2026-07-27(続き4) SMTP未設定でもOTPログインを試せる開発バイパスを追加
   (ユーザー指示「open-redmineの完成度と実用性も高めて」、外部監査で
   「実SMTPサーバーが無いとGUIを一切使い始められない」ことが最重要の
