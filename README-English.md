@@ -1,6 +1,7 @@
-# RS-Red
+# open-redmine
 
-(Formerly `RS-Chiketto`, renamed to `RS-Red` on 2026-07-22. Public site: `https://runo.tokyo/RS-Red`)
+(Formerly `RS-Chiketto`, renamed to `RS-Red` on 2026-07-22, then to
+`open-redmine` on 2026-07-27. Public site: `https://easy-web.tokyo/open-redmine`)
 
 **Development started: 2026-07-21** (GitHub repository creation date)
 

@@ -1,4 +1,4 @@
-//! RS-Redのブラウザフロントエンド(Rust→WebAssembly、オンライン専用)。
+//! open-redmineのブラウザフロントエンド(Rust→WebAssembly、オンライン専用)。
 //!
 //! Tauri・Node.js・TypeScriptには依存しない(このエコシステム共通方針)。
 //! ピンチズームはブラウザ標準機能そのものであり(`index.html`の
@@ -414,6 +414,22 @@ fn wire_ticket_detail() {
         });
     });
 
+    add_click("add-attachment-btn", || {
+        wasm_bindgen_futures::spawn_local(async {
+            let Some(ticket_id) = current_ticket_id() else {
+                return;
+            };
+            match upload_attachment(ticket_id).await {
+                Ok(true) => {
+                    set_text("attachment-status", "");
+                    load_attachments(ticket_id).await;
+                }
+                Ok(false) => {}
+                Err(_) => set_text("attachment-status", "通信エラーが発生しました。"),
+            }
+        });
+    });
+
     add_click("close-ticket-detail-btn", || {
         show("ticket-detail", false);
         set_input_value("selected-ticket-id", "");
@@ -564,6 +580,7 @@ pub fn open_ticket(ticket_id: u32) {
         load_comments(ticket_id).await;
         load_relations(ticket_id).await;
         load_time_entries(ticket_id).await;
+        load_attachments(ticket_id).await;
     });
 }
 
@@ -668,6 +685,159 @@ pub fn delete_time_entry(entry_id: u32) {
             }
             Ok((status_code, msg)) => set_text("time-entry-status", &format!("削除エラー({status_code}): {msg}")),
             Err(_) => set_text("time-entry-status", "通信エラーが発生しました。"),
+        }
+    });
+}
+
+/// 添付ファイル一覧を取得し描画する。削除ボタンの表示可否は
+/// `load_time_entries`と同じ「投稿者本人のみ表示」パターンを踏襲する
+/// (表示上の補助にすぎず、最終防衛は`DELETE /api/attachments/:id`の
+/// サーバー側権限チェック)。
+async fn load_attachments(ticket_id: u64) {
+    let Ok((200, text)) = api("GET", &format!("/api/tickets/{ticket_id}/attachments"), None).await else {
+        return;
+    };
+    let Ok(attachments) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
+        return;
+    };
+    let my_email = local_storage().get_item(EMAIL_KEY).ok().flatten().unwrap_or_default();
+    let mut html = String::new();
+    for a in &attachments {
+        let id = a.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let file_name = escape_html(a.get("file_name").and_then(|v| v.as_str()).unwrap_or(""));
+        let size_bytes = a.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+        let author = escape_html(a.get("author_email").and_then(|v| v.as_str()).unwrap_or(""));
+        let can_delete = !my_email.is_empty() && author == my_email;
+        let delete_btn = if can_delete {
+            format!(r#" <button onclick="delete_attachment({id})">Delete (削除)</button>"#)
+        } else {
+            String::new()
+        };
+        html.push_str(&format!(
+            r#"<li><button class="link-btn" onclick="download_attachment({id})">{file_name}</button> <span class="muted">({size_bytes} bytes, by {author})</span>{delete_btn}</li>"#
+        ));
+    }
+    if html.is_empty() {
+        html = "<li class=\"muted\">添付ファイルはまだありません</li>".to_string();
+    }
+    set_html("attachment-list", &html);
+}
+
+/// `new-attachment-file`(`<input type="file">`)の選択内容を
+/// `multipart/form-data`で`POST /api/tickets/:id/attachments`へ送信する。
+/// `api()`(JSON専用)は使わず、`FormData`+生の`fetch()`を直接組み立てる
+/// (`Content-Type`はブラウザが`boundary`付きで自動設定するため、
+/// `api()`のようにJSON用ヘッダを明示的に設定してはいけない)。
+async fn upload_attachment(ticket_id: u64) -> Result<bool, JsValue> {
+    let input = by_id("new-attachment-file").dyn_into::<HtmlInputElement>()?;
+    let Some(files) = input.files() else {
+        set_text("attachment-status", "ファイルを選択してください。");
+        return Ok(false);
+    };
+    if files.length() == 0 {
+        set_text("attachment-status", "ファイルを選択してください。");
+        return Ok(false);
+    }
+    let Some(file) = files.get(0) else {
+        return Ok(false);
+    };
+    let form_data = web_sys::FormData::new()?;
+    form_data.append_with_blob("file", &file)?;
+
+    let mut opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_mode(RequestMode::SameOrigin);
+    opts.set_body(&form_data);
+    let url = format!("{BASE_PATH}/api/tickets/{ticket_id}/attachments");
+    let request = Request::new_with_str_and_init(&url, &opts)?;
+    if let Some(token) = session_token() {
+        request.headers().set("Authorization", &format!("Bearer {token}"))?;
+    }
+    let resp_value = JsFuture::from(window().fetch_with_request(&request)).await?;
+    let resp: Response = resp_value.dyn_into()?;
+    let status = resp.status();
+    if status == 201 {
+        input.set_value("");
+        Ok(true)
+    } else {
+        let text = JsFuture::from(resp.text()?).await?.as_string().unwrap_or_default();
+        set_text("attachment-status", &format!("エラー({status}): {text}"));
+        Ok(false)
+    }
+}
+
+/// `web/index.html`の`onclick="download_attachment(...)"`から直接呼べる
+/// ようグローバル公開する。`fetch()`でBlobとして取得し、`Object URL`+
+/// 一時`<a download>`要素の合成クリックでブラウザのファイル保存
+/// ダイアログを起動する(セッションは`localStorage`のBearerトークンで
+/// 認証するため、通常の`<a href="...">`直リンクではAuthorizationヘッダを
+/// 送れず認証済みダウンロードができないことへの対応)。
+/// `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+/// `TypeError: Cannot convert 0 to a BigInt`の回避)。
+#[wasm_bindgen]
+pub fn download_attachment(attachment_id: u32) {
+    let attachment_id = attachment_id as u64;
+    wasm_bindgen_futures::spawn_local(async move {
+        if download_attachment_inner(attachment_id).await.is_err() {
+            set_text("attachment-status", "ダウンロードに失敗しました。");
+        }
+    });
+}
+
+async fn download_attachment_inner(attachment_id: u64) -> Result<(), JsValue> {
+    let mut opts = RequestInit::new();
+    opts.set_method("GET");
+    opts.set_mode(RequestMode::SameOrigin);
+    let url = format!("{BASE_PATH}/api/attachments/{attachment_id}/download");
+    let request = Request::new_with_str_and_init(&url, &opts)?;
+    if let Some(token) = session_token() {
+        request.headers().set("Authorization", &format!("Bearer {token}"))?;
+    }
+    let resp_value = JsFuture::from(window().fetch_with_request(&request)).await?;
+    let resp: Response = resp_value.dyn_into()?;
+    if resp.status() != 200 {
+        return Err(JsValue::from_str("download failed"));
+    }
+    let disposition = resp.headers().get("content-disposition").ok().flatten().unwrap_or_default();
+    let filename = disposition
+        .split("filename=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .unwrap_or("download")
+        .to_string();
+
+    let blob_value = JsFuture::from(resp.blob()?).await?;
+    let blob: web_sys::Blob = blob_value.dyn_into()?;
+    let object_url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    let anchor = document().create_element("a")?;
+    anchor.set_attribute("href", &object_url)?;
+    anchor.set_attribute("download", &filename)?;
+    if let Ok(html_el) = anchor.dyn_into::<web_sys::HtmlElement>() {
+        html_el.click();
+    }
+    web_sys::Url::revoke_object_url(&object_url)?;
+    Ok(())
+}
+
+/// `web/index.html`の`onclick="delete_attachment(...)"`から直接呼べるよう
+/// グローバル公開する。**正直な開示**: `DELETE /api/attachments/:id`は
+/// メタデータのみ削除する(`StorageBackend`に削除APIがまだ無いため、
+/// 保存先の実ファイルは残り続ける——`src/attachments.rs`の既知の
+/// 制約、`main.rs::delete_attachment`のコメントに明記済み)。
+/// `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+/// `TypeError: Cannot convert 0 to a BigInt`の回避)。
+#[wasm_bindgen]
+pub fn delete_attachment(attachment_id: u32) {
+    let attachment_id = attachment_id as u64;
+    wasm_bindgen_futures::spawn_local(async move {
+        match api("DELETE", &format!("/api/attachments/{attachment_id}"), None).await {
+            Ok((200, _)) => {
+                if let Some(ticket_id) = current_ticket_id() {
+                    load_attachments(ticket_id).await;
+                }
+            }
+            Ok((status_code, msg)) => set_text("attachment-status", &format!("削除エラー({status_code}): {msg}")),
+            Err(_) => set_text("attachment-status", "通信エラーが発生しました。"),
         }
     });
 }

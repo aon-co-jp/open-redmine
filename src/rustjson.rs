@@ -11,7 +11,7 @@
 //! クロスリポジトリのCargo依存(RPoem側crateへの直接依存)は、この
 //! エコシステムでビルド脆弱性の原因になってきた実績(open-web-server/
 //! RPoemのリリースCIで判明したpath依存問題)があるため避け、小さな
-//! モジュールとして直接コピーする既存パターン(RS-Redの`auth.rs`/
+//! モジュールとして直接コピーする既存パターン(open-redmineの`auth.rs`/
 //! `mail.rs`がRS-Gitから移植されたのと同じ方式)を踏襲する。
 
 use serde_json::{Map, Number, Value};

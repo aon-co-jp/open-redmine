@@ -2,6 +2,17 @@
 /* eslint-disable */
 
 /**
+ * `web/index.html`の`onclick="delete_attachment(...)"`から直接呼べるよう
+ * グローバル公開する。**正直な開示**: `DELETE /api/attachments/:id`は
+ * メタデータのみ削除する(`StorageBackend`に削除APIがまだ無いため、
+ * 保存先の実ファイルは残り続ける——`src/attachments.rs`の既知の
+ * 制約、`main.rs::delete_attachment`のコメントに明記済み)。
+ * `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+ * `TypeError: Cannot convert 0 to a BigInt`の回避)。
+ */
+export function delete_attachment(attachment_id: number): void;
+
+/**
  * `web/index.html`の`onclick="delete_relation(...)"`から直接呼べるよう
  * グローバル公開する(`open_ticket`/`open_wiki_page`と同じパターン)。
  * `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
@@ -18,6 +29,18 @@ export function delete_relation(relation_id: number): void;
  * `TypeError: Cannot convert 0 to a BigInt`の回避)。
  */
 export function delete_time_entry(entry_id: number): void;
+
+/**
+ * `web/index.html`の`onclick="download_attachment(...)"`から直接呼べる
+ * ようグローバル公開する。`fetch()`でBlobとして取得し、`Object URL`+
+ * 一時`<a download>`要素の合成クリックでブラウザのファイル保存
+ * ダイアログを起動する(セッションは`localStorage`のBearerトークンで
+ * 認証するため、通常の`<a href="...">`直リンクではAuthorizationヘッダを
+ * 送れず認証済みダウンロードができないことへの対応)。
+ * `u32`で受ける理由は`select_project`と同じ(2026-07-27追記、
+ * `TypeError: Cannot convert 0 to a BigInt`の回避)。
+ */
+export function download_attachment(attachment_id: number): void;
 
 /**
  * チケット詳細を開く(詳細取得+コメント一覧取得)。JSの`onclick`から
@@ -55,12 +78,14 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly select_project: (a: number) => void;
     readonly start: () => void;
+    readonly download_attachment: (a: number) => void;
     readonly open_ticket: (a: number) => void;
     readonly open_wiki_page: (a: number) => void;
+    readonly delete_attachment: (a: number) => void;
     readonly delete_relation: (a: number) => void;
     readonly delete_time_entry: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h0420fbd9399d5376: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__hb9cd8f1b0a40051a: (a: number, b: number) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h09a373c24dbcf94e: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

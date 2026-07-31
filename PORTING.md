@@ -1,4 +1,4 @@
-# PORTING.md — RS-Red を他プロジェクトへお引越しする際のガイド
+# PORTING.md — open-redmine を他プロジェクトへお引越しする際のガイド
 
 ## 現状(2026-07-23)
 

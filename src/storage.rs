@@ -87,7 +87,7 @@ impl StorageBackend for LocalFsBackend {
 /// 未実装・次回課題)・`RSCHIKETTO_SFTP_BASE_DIR`(リモート側の保存先
 /// ディレクトリ)。
 ///
-/// `open-web-server`が採用している`russh`/`russh-sftp`とは別に、RS-Red
+/// `open-web-server`が採用している`russh`/`russh-sftp`とは別に、open-redmine
 /// では同期API中心で扱いやすい`ssh2`crateを採用している(直接コード共有
 /// はせず、方針だけを参考にした自己完結実装)。
 #[derive(Clone)]

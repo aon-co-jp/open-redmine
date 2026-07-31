@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="RS-Red: RedmineのハイスピードでハイセキュリティなRust版(Rust -> WebAssembly、オンライン専用ブラウザアプリ)" />
-    <title>RS-Red</title>
+    <meta name="description" content="open-redmine: RedmineのハイスピードでハイセキュリティなRust版(Rust -> WebAssembly、オンライン専用ブラウザアプリ)" />
+    <title>open-redmine</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -97,7 +97,7 @@
   </head>
   <body>
     <main>
-      <h1>RS-Red</h1>
+      <h1>open-redmine</h1>
       <p class="muted">Ticket Management &amp; Wiki (Redmine-compatible) (Redmine互換のチケット管理・Wiki) — Rust, online-only browser app (Rust製、オンライン専用ブラウザアプリ)</p>
       <p class="muted">
         This is the admin/production environment. Want to just try it out? Use the demo instead (管理者向け本番環境です。試しに使ってみたい方はデモ環境をどうぞ):
@@ -191,6 +191,12 @@
           <button id="add-time-entry-btn">Log time (作業時間を記録)</button>
           <p id="time-entry-status" class="muted"></p>
 
+          <h3>Attachments (添付ファイル)</h3>
+          <ul id="attachment-list"></ul>
+          <input id="new-attachment-file" type="file" />
+          <button id="add-attachment-btn">Upload (アップロード)</button>
+          <p id="attachment-status" class="muted"></p>
+
           <button id="close-ticket-detail-btn">Close (閉じる)</button>
         </section>
 
@@ -216,7 +222,7 @@
     </main>
 
     <script type="module">
-      import init, { select_project, open_ticket, open_wiki_page, delete_relation, delete_time_entry } from "./pkg/rs_red_web.js";
+      import init, { select_project, open_ticket, open_wiki_page, delete_relation, delete_time_entry, download_attachment, delete_attachment } from "./pkg/rs_red_web.js";
       init().then(() => {
         // `onclick="select_project(...)"`(HTML属性内の素の関数呼び出し)
         // から呼べるよう、モジュールスコープのexportをグローバルへ橋渡しする。
@@ -225,6 +231,8 @@
         window.open_wiki_page = open_wiki_page;
         window.delete_relation = delete_relation;
         window.delete_time_entry = delete_time_entry;
+        window.download_attachment = download_attachment;
+        window.delete_attachment = delete_attachment;
       });
     </script>
   </body>
