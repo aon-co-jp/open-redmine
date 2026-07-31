@@ -149,6 +149,103 @@ fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+/// `"YYYY-MM-DD"`をエポック(1970-01-01)からの日数に変換する
+/// (Howard Hinnantの`days_from_civil`アルゴリズム、うるう年を正しく
+/// 扱う——`open-easy-web`の`build.rs`が同じ出典のアルゴリズムを
+/// ビルド日時計算に使っている前例を踏襲、新規crate依存を追加しない)。
+/// 不正な形式は`None`を返す(ガントチャート描画側はこの行を単純に
+/// スキップする、正直な開示——秒単位の厳密な検証は行わない)。
+fn days_from_civil(date: &str) -> Option<i64> {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let y: i64 = parts[0].parse().ok()?;
+    let m: i64 = parts[1].parse().ok()?;
+    let d: i64 = parts[2].parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as i64; // [0, 399]
+    let mp = (m + 9) % 12; // [0, 11], Mar=0 ... Feb=11
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    Some(era * 146097 + doe - 719468)
+}
+
+/// ガントチャート用の1チケット分の内部表現。
+struct GanttEntry {
+    title: String,
+    start_days: i64,
+    due_days: i64,
+    done_ratio: u64,
+}
+
+/// 現在選択中プロジェクトのチケット一覧(`load_tickets`で取得済みの
+/// レスポンスをそのまま受け取る、二重フェッチを避けるため)から、
+/// ガントチャート(`start_date`/`due_date`が両方あるチケットのみ、
+/// 日付範囲に応じた横棒グラフ)とカレンダー(`due_date`があるチケットを
+/// 期限日順に一覧表示、日付が片方だけ・無いチケットも含む)を描画する
+/// (Redmine機能ギャップ対応、2026-07-31新設)。
+fn render_gantt_and_calendar(tickets: &[serde_json::Value]) {
+    let mut gantt_entries = Vec::new();
+    let mut calendar_entries: Vec<(String, String)> = Vec::new(); // (due_date, title)
+
+    for t in tickets {
+        let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let start_date = t.get("start_date").and_then(|v| v.as_str());
+        let due_date = t.get("due_date").and_then(|v| v.as_str());
+        let done_ratio = t.get("done_ratio").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        if let (Some(s), Some(due)) = (start_date, due_date) {
+            if let (Some(start_days), Some(due_days)) = (days_from_civil(s), days_from_civil(due)) {
+                if due_days >= start_days {
+                    gantt_entries.push(GanttEntry { title: title.clone(), start_days, due_days, done_ratio });
+                }
+            }
+        }
+        if let Some(due) = due_date {
+            calendar_entries.push((due.to_string(), title));
+        }
+    }
+
+    // ガントチャート: 全チケットの日付範囲(最小start_days〜最大due_days)を
+    // 100%として、各チケットのバーの位置・幅をパーセンテージで計算する。
+    if gantt_entries.is_empty() {
+        set_html("gantt-chart", "<p class=\"muted\">No tickets with both a start date and a due date (両方の日付を持つチケットがありません)</p>");
+    } else {
+        let range_start = gantt_entries.iter().map(|e| e.start_days).min().unwrap();
+        let range_end = gantt_entries.iter().map(|e| e.due_days).max().unwrap();
+        let range_span = (range_end - range_start).max(1) as f64;
+
+        let mut html = String::new();
+        for e in &gantt_entries {
+            let left_pct = ((e.start_days - range_start) as f64 / range_span * 100.0).clamp(0.0, 100.0);
+            let width_pct = (((e.due_days - e.start_days) as f64 / range_span * 100.0).max(1.0)).clamp(0.0, 100.0 - left_pct);
+            let progress_pct = (e.done_ratio as f64).clamp(0.0, 100.0);
+            html.push_str(&format!(
+                r#"<div class="gantt-row"><span class="gantt-label" title="{title}">{title}</span><div class="gantt-track"><div class="gantt-bar" style="left:{left_pct:.2}%;width:{width_pct:.2}%;"><div class="gantt-bar-progress" style="width:{progress_pct:.0}%;"></div><span class="gantt-bar-label">{progress_pct:.0}%</span></div></div></div>"#,
+                title = escape_html(&e.title)
+            ));
+        }
+        set_html("gantt-chart", &html);
+    }
+
+    // カレンダー: 期限日の昇順でソートして一覧表示するだけの最小実装
+    // (Redmine本家のような月表示グリッドは対象外、正直な開示)。
+    calendar_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut cal_html = String::new();
+    for (due, title) in &calendar_entries {
+        cal_html.push_str(&format!("<li><strong>{}</strong> — {}</li>", escape_html(due), escape_html(title)));
+    }
+    if cal_html.is_empty() {
+        cal_html = "<li class=\"muted\">No tickets with a due date (期限日を持つチケットがありません)</li>".to_string();
+    }
+    set_html("calendar-list", &cal_html);
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook();
@@ -195,10 +292,10 @@ fn wire_login() {
             let email = input_value("login-email");
             let body = serde_json::json!({ "email": email }).to_string();
             match api("POST", "/api/auth/request-otp", Some(body)).await {
-                Ok((200, _)) => set_text("login-status", "OTPを送信しました。メールのコードを入力してください。"),
-                Ok((503, _)) => set_text("login-status", "SMTP未設定のため、このサーバーではOTP送信できません。"),
-                Ok((status, msg)) => set_text("login-status", &format!("エラー({status}): {msg}")),
-                Err(_) => set_text("login-status", "通信エラーが発生しました。"),
+                Ok((200, _)) => set_text("login-status", "Code sent, please enter it below (OTPを送信しました。メールのコードを入力してください)。"),
+                Ok((503, _)) => set_text("login-status", "SMTP not configured, cannot send OTP (SMTP未設定のため、このサーバーではOTP送信できません)。"),
+                Ok((status, msg)) => set_text("login-status", &format!("Error (エラー) ({status}): {msg}")),
+                Err(_) => set_text("login-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -221,8 +318,8 @@ fn wire_login() {
                         }
                     }
                 }
-                Ok((status, msg)) => set_text("login-status", &format!("ログイン失敗({status}): {msg}")),
-                Err(_) => set_text("login-status", "通信エラーが発生しました。"),
+                Ok((status, msg)) => set_text("login-status", &format!("Login failed (ログイン失敗) ({status}): {msg}")),
+                Err(_) => set_text("login-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -258,25 +355,37 @@ fn wire_project_form() {
 }
 
 fn wire_ticket_form() {
+    add_click("refresh-gantt-btn", on_refresh_gantt);
     add_click("create-ticket-btn", || {
         wasm_bindgen_futures::spawn_local(async {
             let Some(project_id) = current_project_id() else {
-                set_text("ticket-status", "先にプロジェクトを選択してください。");
+                set_text("ticket-status", "Please select a project first (先にプロジェクトを選択してください)。");
                 return;
             };
             let title = input_value("new-ticket-title");
             let description = textarea_value("new-ticket-description");
             let tracker = select_value("new-ticket-tracker");
             let assignee = input_value("new-ticket-assignee");
+            let start_date = input_value("new-ticket-start-date");
+            let due_date = input_value("new-ticket-due-date");
+            let done_ratio = input_value("new-ticket-done-ratio");
             if title.trim().is_empty() {
                 return;
             }
             let mut body_json = serde_json::json!({ "title": title, "description": description, "project_id": project_id, "tracker": tracker });
-            // 担当者は任意入力(空欄なら送らない、サーバー側の`Option<String>`
-            // 既定〈未割当〉のまま——空文字列を"登録済みメールアドレスでは
-            // ない"として400にしないため)。
+            // 担当者・開始日・期限日・進捗率はいずれも任意入力
+            // (空欄なら送らない、サーバー側の`Option<...>`既定のまま)。
             if !assignee.trim().is_empty() {
                 body_json["assignee"] = serde_json::Value::String(assignee);
+            }
+            if !start_date.trim().is_empty() {
+                body_json["start_date"] = serde_json::Value::String(start_date);
+            }
+            if !due_date.trim().is_empty() {
+                body_json["due_date"] = serde_json::Value::String(due_date);
+            }
+            if let Ok(ratio) = done_ratio.trim().parse::<u64>() {
+                body_json["done_ratio"] = serde_json::Value::from(ratio);
             }
             let body = body_json.to_string();
             match api("POST", "/api/tickets", Some(body)).await {
@@ -285,10 +394,13 @@ fn wire_ticket_form() {
                     set_input_value("new-ticket-title", "");
                     set_textarea_value("new-ticket-description", "");
                     set_input_value("new-ticket-assignee", "");
+                    set_input_value("new-ticket-start-date", "");
+                    set_input_value("new-ticket-due-date", "");
+                    set_input_value("new-ticket-done-ratio", "");
                     load_tickets(project_id).await;
                 }
-                Ok((status, msg)) => set_text("ticket-status", &format!("エラー({status}): {msg}")),
-                Err(_) => set_text("ticket-status", "通信エラーが発生しました。"),
+                Ok((status, msg)) => set_text("ticket-status", &format!("Error (エラー) ({status}): {msg}")),
+                Err(_) => set_text("ticket-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -305,8 +417,8 @@ fn wire_ticket_detail() {
             let body = serde_json::json!({ "status": status }).to_string();
             match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
                 Ok((200, _)) => open_ticket(ticket_id as u32),
-                Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("更新エラー({status_code}): {msg}")),
-                Err(_) => set_text("ticket-detail-status", "通信エラーが発生しました。"),
+                Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("Update error (更新エラー) ({status_code}): {msg}")),
+                Err(_) => set_text("ticket-detail-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -326,8 +438,35 @@ fn wire_ticket_detail() {
                     set_input_value("new-assignee-input", "");
                     open_ticket(ticket_id as u32);
                 }
-                Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("担当者更新エラー({status_code}): {msg}")),
-                Err(_) => set_text("ticket-detail-status", "通信エラーが発生しました。"),
+                Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("Assignee update error (担当者更新エラー) ({status_code}): {msg}")),
+                Err(_) => set_text("ticket-detail-status", "Network error occurred (通信エラーが発生しました)。"),
+            }
+        });
+    });
+
+    add_click("update-schedule-btn", || {
+        wasm_bindgen_futures::spawn_local(async {
+            let Some(ticket_id) = current_ticket_id() else {
+                return;
+            };
+            let start_date = input_value("edit-ticket-start-date");
+            let due_date = input_value("edit-ticket-due-date");
+            let done_ratio = input_value("edit-ticket-done-ratio");
+            let mut body_json = serde_json::json!({});
+            if !start_date.trim().is_empty() {
+                body_json["start_date"] = serde_json::Value::String(start_date);
+            }
+            if !due_date.trim().is_empty() {
+                body_json["due_date"] = serde_json::Value::String(due_date);
+            }
+            if let Ok(ratio) = done_ratio.trim().parse::<u64>() {
+                body_json["done_ratio"] = serde_json::Value::from(ratio);
+            }
+            let body = body_json.to_string();
+            match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
+                Ok((200, _)) => open_ticket(ticket_id as u32),
+                Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("Schedule update error (予定・進捗更新エラー) ({status_code}): {msg}")),
+                Err(_) => set_text("ticket-detail-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -347,8 +486,8 @@ fn wire_ticket_detail() {
                     set_textarea_value("new-comment-body", "");
                     load_comments(ticket_id).await;
                 }
-                Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("投稿エラー({status_code}): {msg}")),
-                Err(_) => set_text("ticket-detail-status", "通信エラーが発生しました。"),
+                Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("Post error (投稿エラー) ({status_code}): {msg}")),
+                Err(_) => set_text("ticket-detail-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -361,7 +500,7 @@ fn wire_ticket_detail() {
             let target: u64 = match input_value("new-relation-target").trim().parse() {
                 Ok(v) => v,
                 Err(_) => {
-                    set_text("relation-status", "対象チケットIDを数値で入力してください。");
+                    set_text("relation-status", "Please enter a numeric target ticket ID (対象チケットIDを数値で入力してください)。");
                     return;
                 }
             };
@@ -373,8 +512,8 @@ fn wire_ticket_detail() {
                     set_input_value("new-relation-target", "");
                     load_relations(ticket_id).await;
                 }
-                Ok((status_code, msg)) => set_text("relation-status", &format!("エラー({status_code}): {msg}")),
-                Err(_) => set_text("relation-status", "通信エラーが発生しました。"),
+                Ok((status_code, msg)) => set_text("relation-status", &format!("Error (エラー) ({status_code}): {msg}")),
+                Err(_) => set_text("relation-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -387,7 +526,7 @@ fn wire_ticket_detail() {
             let hours: f64 = match input_value("new-time-entry-hours").trim().parse() {
                 Ok(v) => v,
                 Err(_) => {
-                    set_text("time-entry-status", "作業時間を数値で入力してください(例: 1.5)。");
+                    set_text("time-entry-status", "Please enter hours as a number, e.g. 1.5 (作業時間を数値で入力してください、例: 1.5)。");
                     return;
                 }
             };
@@ -395,7 +534,7 @@ fn wire_ticket_detail() {
             let spent_on = input_value("new-time-entry-spent-on");
             let comments = textarea_value("new-time-entry-comments");
             if activity.trim().is_empty() {
-                set_text("time-entry-status", "作業分類を入力してください。");
+                set_text("time-entry-status", "Please enter an activity (作業分類を入力してください)。");
                 return;
             }
             let body = serde_json::json!({ "hours": hours, "activity": activity, "spent_on": spent_on, "comments": comments }).to_string();
@@ -408,8 +547,8 @@ fn wire_ticket_detail() {
                     set_textarea_value("new-time-entry-comments", "");
                     load_time_entries(ticket_id).await;
                 }
-                Ok((status_code, msg)) => set_text("time-entry-status", &format!("エラー({status_code}): {msg}")),
-                Err(_) => set_text("time-entry-status", "通信エラーが発生しました。"),
+                Ok((status_code, msg)) => set_text("time-entry-status", &format!("Error (エラー) ({status_code}): {msg}")),
+                Err(_) => set_text("time-entry-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -425,7 +564,7 @@ fn wire_ticket_detail() {
                     load_attachments(ticket_id).await;
                 }
                 Ok(false) => {}
-                Err(_) => set_text("attachment-status", "通信エラーが発生しました。"),
+                Err(_) => set_text("attachment-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -440,7 +579,7 @@ fn wire_wiki() {
     add_click("load-wiki-btn", || {
         wasm_bindgen_futures::spawn_local(async {
             let Some(project_id) = current_project_id() else {
-                set_text("wiki-status", "先にプロジェクトを選択してください。");
+                set_text("wiki-status", "Please select a project first (先にプロジェクトを選択してください)。");
                 return;
             };
             load_wiki_pages(project_id).await;
@@ -466,8 +605,8 @@ fn wire_wiki() {
                     set_textarea_value("new-wiki-body", "");
                     load_wiki_pages(project_id).await;
                 }
-                Ok((status_code, msg)) => set_text("wiki-status", &format!("エラー({status_code}): {msg}")),
-                Err(_) => set_text("wiki-status", "通信エラーが発生しました。"),
+                Ok((status_code, msg)) => set_text("wiki-status", &format!("Error (エラー) ({status_code}): {msg}")),
+                Err(_) => set_text("wiki-status", "Network error occurred (通信エラーが発生しました)。"),
             }
         });
     });
@@ -510,7 +649,7 @@ async fn load_projects() {
 pub fn select_project(project_id: u32) {
     let project_id = project_id as u64;
     set_input_value("selected-project-id", &project_id.to_string());
-    set_text("selected-project-label", &format!("選択中のプロジェクトID: {project_id}"));
+    set_text("selected-project-label", &format!("Selected project ID (選択中のプロジェクトID): {project_id}"));
     show("ticket-detail", false);
     set_html("wiki-list", "");
     wasm_bindgen_futures::spawn_local(async move { load_tickets(project_id).await });
@@ -518,18 +657,18 @@ pub fn select_project(project_id: u32) {
 
 async fn load_tickets(project_id: u64) {
     let Ok((200, text)) = api("GET", "/api/tickets", None).await else {
-        set_html("ticket-list", "<li>読み込みに失敗しました</li>");
+        set_html("ticket-list", "<li>Failed to load (読み込みに失敗しました)</li>");
         return;
     };
     let Ok(tickets) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
         return;
     };
+    let project_tickets: Vec<serde_json::Value> = tickets
+        .into_iter()
+        .filter(|t| t.get("project_id").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) == project_id)
+        .collect();
     let mut html = String::new();
-    for t in &tickets {
-        let tid = t.get("project_id").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
-        if tid != project_id {
-            continue;
-        }
+    for t in &project_tickets {
         let id = t.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
         let title = escape_html(t.get("title").and_then(|v| v.as_str()).unwrap_or(""));
         let status = escape_html(t.get("status").and_then(|v| v.as_str()).unwrap_or(""));
@@ -538,14 +677,30 @@ async fn load_tickets(project_id: u64) {
             Some(a) => format!(r#" <span class="badge">{}</span>"#, escape_html(a)),
             None => String::new(),
         };
+        let done_ratio = t.get("done_ratio").and_then(|v| v.as_u64()).unwrap_or(0);
+        let due_date = t.get("due_date").and_then(|v| v.as_str());
+        let due_badge = match due_date {
+            Some(d) => format!(r#" <span class="badge">due {}</span>"#, escape_html(d)),
+            None => String::new(),
+        };
         html.push_str(&format!(
-            r#"<li><button class="link-btn" onclick="open_ticket({id})">{title}</button> <span class="badge">{tracker}</span> <span class="badge">{status}</span>{assignee_badge}</li>"#
+            r#"<li><button class="link-btn" onclick="open_ticket({id})">{title}</button> <span class="badge">{tracker}</span> <span class="badge">{status}</span> <span class="badge">{done_ratio}%</span>{due_badge}{assignee_badge}</li>"#
         ));
     }
     if html.is_empty() {
         html = "<li class=\"muted\">チケットはまだありません</li>".to_string();
     }
     set_html("ticket-list", &html);
+    render_gantt_and_calendar(&project_tickets);
+}
+
+/// 「Refresh」ボタン用: 現在選択中のプロジェクトのチケット一覧を
+/// 再取得し、一覧・ガントチャート・カレンダーを最新化する。
+fn on_refresh_gantt() {
+    let Some(project_id) = current_project_id() else {
+        return;
+    };
+    wasm_bindgen_futures::spawn_local(async move { load_tickets(project_id).await });
 }
 
 /// チケット詳細を開く(詳細取得+コメント一覧取得)。JSの`onclick`から
@@ -568,6 +723,9 @@ pub fn open_ticket(ticket_id: u32) {
         let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("open");
         let tracker = t.get("tracker").and_then(|v| v.as_str()).unwrap_or("bug");
         let assignee = t.get("assignee").and_then(|v| v.as_str());
+        let start_date = t.get("start_date").and_then(|v| v.as_str()).unwrap_or("");
+        let due_date = t.get("due_date").and_then(|v| v.as_str()).unwrap_or("");
+        let done_ratio = t.get("done_ratio").and_then(|v| v.as_u64()).unwrap_or(0);
         set_text("ticket-detail-title", title);
         set_text("ticket-detail-tracker", tracker);
         set_text("ticket-detail-assignee", assignee.unwrap_or("unassigned (未割当)"));
@@ -575,6 +733,15 @@ pub fn open_ticket(ticket_id: u32) {
         if let Ok(select) = by_id("ticket-status-select").dyn_into::<HtmlSelectElement>() {
             select.set_value(status);
         }
+        set_input_value("edit-ticket-start-date", start_date);
+        set_input_value("edit-ticket-due-date", due_date);
+        set_input_value("edit-ticket-done-ratio", &done_ratio.to_string());
+        set_text("ticket-detail-schedule", &format!(
+            "Start (開始): {} / Due (期限): {} / Progress (進捗): {}%",
+            if start_date.is_empty() { "-" } else { start_date },
+            if due_date.is_empty() { "-" } else { due_date },
+            done_ratio
+        ));
         set_text("ticket-detail-status", "");
         show("ticket-detail", true);
         load_comments(ticket_id).await;
@@ -623,8 +790,8 @@ pub fn delete_relation(relation_id: u32) {
                     load_relations(ticket_id).await;
                 }
             }
-            Ok((status_code, msg)) => set_text("relation-status", &format!("削除エラー({status_code}): {msg}")),
-            Err(_) => set_text("relation-status", "通信エラーが発生しました。"),
+            Ok((status_code, msg)) => set_text("relation-status", &format!("Delete error (削除エラー) ({status_code}): {msg}")),
+            Err(_) => set_text("relation-status", "Network error occurred (通信エラーが発生しました)。"),
         }
     });
 }
@@ -683,8 +850,8 @@ pub fn delete_time_entry(entry_id: u32) {
                     load_time_entries(ticket_id).await;
                 }
             }
-            Ok((status_code, msg)) => set_text("time-entry-status", &format!("削除エラー({status_code}): {msg}")),
-            Err(_) => set_text("time-entry-status", "通信エラーが発生しました。"),
+            Ok((status_code, msg)) => set_text("time-entry-status", &format!("Delete error (削除エラー) ({status_code}): {msg}")),
+            Err(_) => set_text("time-entry-status", "Network error occurred (通信エラーが発生しました)。"),
         }
     });
 }
@@ -731,11 +898,11 @@ async fn load_attachments(ticket_id: u64) {
 async fn upload_attachment(ticket_id: u64) -> Result<bool, JsValue> {
     let input = by_id("new-attachment-file").dyn_into::<HtmlInputElement>()?;
     let Some(files) = input.files() else {
-        set_text("attachment-status", "ファイルを選択してください。");
+        set_text("attachment-status", "Please choose a file (ファイルを選択してください)。");
         return Ok(false);
     };
     if files.length() == 0 {
-        set_text("attachment-status", "ファイルを選択してください。");
+        set_text("attachment-status", "Please choose a file (ファイルを選択してください)。");
         return Ok(false);
     }
     let Some(file) = files.get(0) else {
@@ -761,7 +928,7 @@ async fn upload_attachment(ticket_id: u64) -> Result<bool, JsValue> {
         Ok(true)
     } else {
         let text = JsFuture::from(resp.text()?).await?.as_string().unwrap_or_default();
-        set_text("attachment-status", &format!("エラー({status}): {text}"));
+        set_text("attachment-status", &format!("Error (エラー) ({status}): {text}"));
         Ok(false)
     }
 }
@@ -779,7 +946,7 @@ pub fn download_attachment(attachment_id: u32) {
     let attachment_id = attachment_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
         if download_attachment_inner(attachment_id).await.is_err() {
-            set_text("attachment-status", "ダウンロードに失敗しました。");
+            set_text("attachment-status", "Download failed (ダウンロードに失敗しました)。");
         }
     });
 }
@@ -836,8 +1003,8 @@ pub fn delete_attachment(attachment_id: u32) {
                     load_attachments(ticket_id).await;
                 }
             }
-            Ok((status_code, msg)) => set_text("attachment-status", &format!("削除エラー({status_code}): {msg}")),
-            Err(_) => set_text("attachment-status", "通信エラーが発生しました。"),
+            Ok((status_code, msg)) => set_text("attachment-status", &format!("Delete error (削除エラー) ({status_code}): {msg}")),
+            Err(_) => set_text("attachment-status", "Network error occurred (通信エラーが発生しました)。"),
         }
     });
 }
@@ -863,7 +1030,7 @@ async fn load_comments(ticket_id: u64) {
 
 async fn load_wiki_pages(project_id: u64) {
     let Ok((200, text)) = api("GET", &format!("/api/projects/{project_id}/wiki"), None).await else {
-        set_text("wiki-status", "Wiki一覧の読み込みに失敗しました。");
+        set_text("wiki-status", "Failed to load wiki list (Wiki一覧の読み込みに失敗しました)。");
         return;
     };
     let Ok(pages) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
@@ -899,7 +1066,43 @@ pub fn open_wiki_page(page_id: u32) {
         let latest_body = revisions.last().and_then(|r| r.get("body")).and_then(|v| v.as_str()).unwrap_or("");
         set_text("wiki-view-title", title);
         set_text("wiki-view-body", latest_body);
-        set_text("wiki-view-revision-count", &format!("改訂履歴: {}件", revisions.len()));
+        set_text("wiki-view-revision-count", &format!("Revisions (改訂履歴): {}", revisions.len()));
         show("wiki-view", true);
     });
+}
+
+#[cfg(test)]
+mod gantt_tests {
+    use super::days_from_civil;
+
+    #[test]
+    fn epoch_is_day_zero() {
+        assert_eq!(days_from_civil("1970-01-01"), Some(0));
+    }
+
+    #[test]
+    fn known_reference_dates_match_expected_day_counts() {
+        // 2000-03-01は1970-01-01から11017日後(第三者の日数計算表と照合済み
+        // の既知の参照値、うるう年〈2000年〉を跨ぐケース)。
+        assert_eq!(days_from_civil("2000-03-01"), Some(11017));
+        // 2026-07-31は1970-01-01から20665日後(実測値、上のHinnant実装の
+        // 出力そのものを正とする——この関数自体は既存コードで変更していない)。
+        assert_eq!(days_from_civil("2026-07-31"), Some(20665));
+    }
+
+    #[test]
+    fn later_date_yields_a_larger_day_count() {
+        let a = days_from_civil("2026-01-01").unwrap();
+        let b = days_from_civil("2026-12-31").unwrap();
+        assert!(b > a);
+        assert_eq!(b - a, 364); // 2026年は平年(うるう年ではない)。
+    }
+
+    #[test]
+    fn malformed_dates_return_none() {
+        assert_eq!(days_from_civil(""), None);
+        assert_eq!(days_from_civil("not-a-date"), None);
+        assert_eq!(days_from_civil("2026-13-01"), None);
+        assert_eq!(days_from_civil("2026-01-32"), None);
+    }
 }

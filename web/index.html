@@ -86,6 +86,19 @@
       }
       .muted { color: var(--muted); font-size: 0.9rem; }
       .hidden { display: none; }
+      .gantt-row {
+        display: grid;
+        grid-template-columns: 12rem 1fr;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.3rem 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .gantt-label { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .gantt-track { position: relative; height: 1.2rem; background: var(--border); border-radius: 4px; }
+      .gantt-bar { position: absolute; top: 0; height: 100%; border-radius: 4px; background: #6b8fce; }
+      .gantt-bar-progress { position: absolute; top: 0; left: 0; height: 100%; border-radius: 4px 0 0 4px; background: #2f5aa8; }
+      .gantt-bar-label { position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: 0.7rem; line-height: 1.2rem; color: white; text-shadow: 0 0 2px rgba(0,0,0,0.6); white-space: nowrap; }
 
       /* スマホ縦画面向けレスポンシブ対応(Mobile portrait responsive layout) */
       @media (max-width: 600px) {
@@ -141,9 +154,33 @@
             <option value="task">Task (作業)</option>
           </select>
           <label for="new-ticket-assignee">Assignee email, optional (担当者メールアドレス・任意)</label>
-          <input id="new-ticket-assignee" type="text" placeholder="e.g. dev@example.com" />
+          <input id="new-ticket-assignee" type="text" placeholder="e.g. dev@example.com (例: dev@example.com)" />
+          <label for="new-ticket-start-date">Start date, optional (開始日・任意)</label>
+          <input id="new-ticket-start-date" type="date" />
+          <label for="new-ticket-due-date">Due date, optional (期限日・任意)</label>
+          <input id="new-ticket-due-date" type="date" />
+          <label for="new-ticket-done-ratio">Progress %, optional (進捗率・任意)</label>
+          <input id="new-ticket-done-ratio" type="number" min="0" max="100" placeholder="0-100 (0〜100)" />
           <button id="create-ticket-btn">Create ticket (チケット作成)</button>
           <p id="ticket-status" class="muted"></p>
+        </section>
+
+        <section id="gantt-section">
+          <h2>Gantt chart &amp; Calendar (ガントチャート・カレンダー)</h2>
+          <p class="muted">
+            Uses each ticket's start date, due date, and progress
+            (start_date/due_date/done_ratio). Tickets without both dates are
+            skipped from the Gantt chart but still listed in the calendar
+            view by due date.<br>
+            各チケットの開始日・期限日・進捗率(start_date/due_date/
+            done_ratio)を使用します。両方の日付が無いチケットはガント
+            チャートには表示されませんが、カレンダー(期限日一覧)には
+            表示されます。
+          </p>
+          <button id="refresh-gantt-btn">Refresh (更新)</button>
+          <div id="gantt-chart" class="muted">Select a project to view its Gantt chart (プロジェクトを選択するとガントチャートが表示されます)</div>
+          <h3>Calendar (due dates) / カレンダー(期限日順)</h3>
+          <ul id="calendar-list"></ul>
         </section>
 
         <section id="ticket-detail" class="hidden">
@@ -154,14 +191,25 @@
           <label for="ticket-status-select">Status (ステータス)</label>
           <input id="selected-ticket-id" type="hidden" value="" />
           <select id="ticket-status-select">
-            <option value="open">open</option>
-            <option value="in_progress">in_progress</option>
-            <option value="closed">closed</option>
+            <option value="open">open (未着手)</option>
+            <option value="in_progress">in_progress (対応中)</option>
+            <option value="resolved">resolved (解決・報告者確認待ち)</option>
+            <option value="closed">closed (完了)</option>
           </select>
           <button id="update-status-btn">Update status (ステータス更新)</button>
           <label for="new-assignee-input">Reassign to email (担当者を変更)</label>
-          <input id="new-assignee-input" type="text" placeholder="e.g. dev@example.com" />
+          <input id="new-assignee-input" type="text" placeholder="e.g. dev@example.com (例: dev@example.com)" />
           <button id="update-assignee-btn">Update assignee (担当者更新)</button>
+
+          <h3>Schedule &amp; Progress (予定日・進捗率)</h3>
+          <p id="ticket-detail-schedule" class="muted"></p>
+          <label for="edit-ticket-start-date">Start date (開始日)</label>
+          <input id="edit-ticket-start-date" type="date" />
+          <label for="edit-ticket-due-date">Due date (期限日)</label>
+          <input id="edit-ticket-due-date" type="date" />
+          <label for="edit-ticket-done-ratio">Progress %, 0-100 (進捗率)</label>
+          <input id="edit-ticket-done-ratio" type="number" min="0" max="100" />
+          <button id="update-schedule-btn">Update schedule (予定・進捗を更新)</button>
           <p id="ticket-detail-status" class="muted"></p>
 
           <h3>Comments (コメント)</h3>
@@ -186,7 +234,7 @@
           <p id="time-entry-total" class="muted"></p>
           <input id="new-time-entry-hours" type="text" placeholder="Hours (作業時間、例: 1.5)" inputmode="decimal" />
           <input id="new-time-entry-activity" type="text" placeholder="Activity (作業分類、例: Development)" />
-          <input id="new-time-entry-spent-on" type="text" placeholder="Date YYYY-MM-DD (作業日)" />
+          <input id="new-time-entry-spent-on" type="text" placeholder="Date YYYY-MM-DD, e.g. 2026-07-31 (作業日、例: 2026-07-31)" />
           <textarea id="new-time-entry-comments" placeholder="Comment (コメント、任意)" rows="2"></textarea>
           <button id="add-time-entry-btn">Log time (作業時間を記録)</button>
           <p id="time-entry-status" class="muted"></p>
@@ -207,7 +255,7 @@
           <ul id="wiki-list"></ul>
 
           <h3>New page (新規ページ作成)</h3>
-          <input id="new-wiki-slug" type="text" placeholder="slug (e.g. getting-started)" />
+          <input id="new-wiki-slug" type="text" placeholder="slug (e.g. getting-started / 例: getting-started)" />
           <input id="new-wiki-title" type="text" placeholder="Title (タイトル)" />
           <textarea id="new-wiki-body" placeholder="Body (本文)" rows="4"></textarea>
           <button id="create-wiki-btn">Create wiki page (Wikiページ作成)</button>

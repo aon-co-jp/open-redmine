@@ -17,6 +17,14 @@ pub struct Project {
     /// 親プロジェクトの`id`(サブプロジェクト階層、`None`ならトップレベル)。
     #[serde(default)]
     pub parent_id: Option<u64>,
+    /// このプロジェクト配下のチケットが持てるカスタムフィールド名の一覧
+    /// (Redmine機能ギャップ対応、2026-07-31追加)。`Ticket::custom_fields`
+    /// のキーはここに含まれる名前でなければならない。フィールドの型指定
+    /// (数値/真偽値/リスト/日付)は行わない自由文字列のみの最小実装
+    /// (正直な開示——Redmine本家のカスタムフィールド管理画面のような
+    /// 型ごとのバリデーション・必須指定は今回のスコープ外)。
+    #[serde(default)]
+    pub custom_field_defs: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -108,6 +116,7 @@ mod tests {
             name: "demo".to_string(),
             description: "a demo project".to_string(),
             parent_id: None,
+            custom_field_defs: Vec::new(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         });
@@ -130,6 +139,7 @@ mod tests {
             name: format!("p{id}"),
             description: String::new(),
             parent_id,
+            custom_field_defs: Vec::new(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         };

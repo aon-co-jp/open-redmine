@@ -54,6 +54,41 @@ impl Default for AccessConfig {
     }
 }
 
+/// 名前付きロールプリセット(Redmine本家のManager/Developer/Reporterに
+/// 相当、2026-07-31追加)。既存の生フラグ(`allow_view`/`allow_edit`/
+/// `allow_manage_members`)による個別付与はそのまま使える——このプリセットは
+/// それらへの単なる展開(ショートカット)であり、内部データモデルに新しい
+/// 概念を追加するものではない(既存の`AccountPermission`をそのまま使う)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolePreset {
+    /// 閲覧・編集・メンバー管理のすべてを許可。
+    Manager,
+    /// 閲覧・編集を許可、メンバー管理は不可。
+    Developer,
+    /// 閲覧のみ許可。
+    Reporter,
+}
+
+impl RolePreset {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "manager" => Some(Self::Manager),
+            "developer" => Some(Self::Developer),
+            "reporter" => Some(Self::Reporter),
+            _ => None,
+        }
+    }
+
+    pub fn permissions(self) -> AccountPermission {
+        match self {
+            RolePreset::Manager => AccountPermission { allow_view: true, allow_edit: true, allow_manage_members: true },
+            RolePreset::Developer => AccountPermission { allow_view: true, allow_edit: true, allow_manage_members: false },
+            RolePreset::Reporter => AccountPermission { allow_view: true, allow_edit: false, allow_manage_members: false },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
     View,
