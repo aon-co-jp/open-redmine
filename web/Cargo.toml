@@ -3,8 +3,8 @@ name = "rs-red-web"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "RS-Red(Redmine Rust版)のブラウザフロントエンド(Rust→WebAssembly、オンライン専用、Tauri/Node.js/TypeScript不使用)。標準のviewportメタタグによりAndroid等モバイルブラウザのピンチズームがそのまま機能する(特別な実装不要)。"
-repository = "https://github.com/aon-co-jp/RS-Red"
+description = "open-redmine(Redmine Rust版)のブラウザフロントエンド(Rust→WebAssembly、オンライン専用、Tauri/Node.js/TypeScript不使用)。標準のviewportメタタグによりAndroid等モバイルブラウザのピンチズームがそのまま機能する(特別な実装不要)。"
+repository = "https://github.com/aon-co-jp/open-redmine"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -39,4 +39,9 @@ features = [
     "RequestMode",
     "Response",
     "Storage",
+    "FormData",
+    "File",
+    "FileList",
+    "Url",
+    "Blob",
 ]

@@ -1711,7 +1711,7 @@ mod handler_tests {
         let resp = client.get("/").send().await;
         resp.assert_status_is_ok();
         let body = resp.0.into_body().into_string().await.unwrap();
-        assert!(body.contains("<title>RS-Red</title>"));
+        assert!(body.contains("<title>open-redmine</title>"));
         assert!(body.contains("request-otp-btn"));
     }
 

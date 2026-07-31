@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Redmineのハイスピードでハイセキュリティで省メモリなRust+RPoem版(v0.1.0時点はチケット管理の最小実装のみ)"
-repository = "https://github.com/aon-co-jp/RS-Red"
+repository = "https://github.com/aon-co-jp/open-redmine"
 
 [[bin]]
 name = "rs-chiketto"
