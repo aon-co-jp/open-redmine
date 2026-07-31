@@ -25,6 +25,12 @@ pub struct Project {
     /// 型ごとのバリデーション・必須指定は今回のスコープ外)。
     #[serde(default)]
     pub custom_field_defs: Vec<String>,
+    /// このプロジェクト配下のチケットが選択できるカテゴリ名の一覧
+    /// (Redmine本家の「トラッカーの分類」相当、2026-07-31追加)。
+    /// `Ticket::category`はここに含まれる名前でなければならない
+    /// (`custom_field_defs`と同じ検証パターンを踏襲)。
+    #[serde(default)]
+    pub category_defs: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -117,6 +123,7 @@ mod tests {
             description: "a demo project".to_string(),
             parent_id: None,
             custom_field_defs: Vec::new(),
+            category_defs: Vec::new(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         });
@@ -140,6 +147,7 @@ mod tests {
             description: String::new(),
             parent_id,
             custom_field_defs: Vec::new(),
+            category_defs: Vec::new(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         };

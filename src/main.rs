@@ -144,6 +144,10 @@ struct CreateProjectRequest {
     /// (2026-07-31追加)。
     #[serde(default)]
     custom_field_defs: Vec<String>,
+    /// このプロジェクト配下のチケットが選択できるカテゴリ名一覧
+    /// (2026-07-31追加)。
+    #[serde(default)]
+    category_defs: Vec<String>,
 }
 
 /// `POST /api/projects` — プロジェクトを新規作成する(管理者のみ、
@@ -172,6 +176,7 @@ async fn create_project(req: &Request, state: Data<&AppState>, body: poem::web::
         description: body.description.clone(),
         parent_id: body.parent_id,
         custom_field_defs: body.custom_field_defs.clone(),
+        category_defs: body.category_defs.clone(),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -219,6 +224,10 @@ struct UpdateProjectRequest {
     /// 値自体は保持される)。
     #[serde(default)]
     custom_field_defs: Option<Vec<String>>,
+    /// カテゴリ定義の置き換え(指定した場合のみ、`custom_field_defs`と
+    /// 同じ「既存チケットの値は削除しない」方針、2026-07-31追加)。
+    #[serde(default)]
+    category_defs: Option<Vec<String>>,
 }
 
 /// 二重`Option`のデシリアライズ補助: フィールド省略は`None`
@@ -269,6 +278,9 @@ async fn update_project(
     }
     if let Some(new_parent) = body.parent_id {
         proj.parent_id = new_parent;
+    }
+    if let Some(defs) = &body.category_defs {
+        proj.category_defs = defs.clone();
     }
     if let Some(defs) = &body.custom_field_defs {
         proj.custom_field_defs = defs.clone();
@@ -375,6 +387,12 @@ struct Ticket {
     /// 優先度(Redmine機能ギャップ対応、2026-07-31追加)。
     #[serde(default)]
     priority: Priority,
+    /// カテゴリ(Redmine本家の「トラッカーの分類」相当、2026-07-31追加)。
+    /// 指定する場合は所属プロジェクトの`Project::category_defs`に
+    /// 含まれる名前でなければならない(`custom_fields_are_defined`と
+    /// 同じ検証パターン、ハンドラ側で`400`拒否)。
+    #[serde(default)]
+    category: Option<String>,
     /// チケットが所属する`Project`の`id`(実体を持つ`project.rs`の
     /// `Project`エンティティを参照、旧`project: String`+ハッシュの
     /// 置き換え——CLAUDE.md HANDOFF「(3) Project自体のCRUD」対応)。
@@ -448,6 +466,8 @@ struct CreateTicketRequest {
     #[serde(default)]
     priority: Option<Priority>,
     #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
     start_date: Option<String>,
     #[serde(default)]
     due_date: Option<String>,
@@ -490,6 +510,11 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
     if !custom_fields_are_defined(&body.custom_fields, &project.custom_field_defs) {
         return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("custom_fields contains a key not defined on the project (see Project.custom_field_defs)"));
     }
+    if let Some(category) = &body.category {
+        if !project.category_defs.iter().any(|c| c == category) {
+            return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("category is not defined on the project (see Project.category_defs)"));
+        }
+    }
     check_project_access(req, &state, body.project_id, access::Need::Edit).await?;
     if body.title.trim().is_empty() {
         return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("title must not be empty"));
@@ -515,6 +540,7 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
         status: TicketStatus::Open,
         tracker: body.tracker.unwrap_or_default(),
         priority: body.priority.unwrap_or_default(),
+        category: body.category.clone(),
         project_id: body.project_id,
         start_date: body.start_date.clone(),
         due_date: body.due_date.clone(),
@@ -674,6 +700,8 @@ struct UpdateTicketRequest {
     #[serde(default)]
     priority: Option<Priority>,
     #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
     start_date: Option<String>,
     #[serde(default)]
     due_date: Option<String>,
@@ -714,6 +742,13 @@ async fn update_ticket(
             return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("custom_fields contains a key not defined on the project (see Project.custom_field_defs)"));
         }
     }
+    if let Some(category) = &body.category {
+        let projects = project::load(&state.data_root, state.backend.as_ref()).await;
+        let allowed = projects.find(existing.project_id).map(|p| p.category_defs.clone()).unwrap_or_default();
+        if !allowed.iter().any(|c| c == category) {
+            return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body("category is not defined on the project (see Project.category_defs)"));
+        }
+    }
     let mut store = store_preview;
     let Some(ticket) = store.tickets.iter_mut().find(|t| t.id == id) else {
         return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("ticket not found"));
@@ -732,6 +767,9 @@ async fn update_ticket(
     }
     if let Some(priority) = body.priority {
         ticket.priority = priority;
+    }
+    if let Some(category) = &body.category {
+        ticket.category = Some(category.clone());
     }
     if let Some(done_ratio) = body.done_ratio {
         if done_ratio_out_of_range(done_ratio) {
@@ -3552,5 +3590,65 @@ mod handler_tests {
         let updated_body: serde_json::Value = updated.json().await.value().deserialize();
         assert_eq!(updated_body["created_at"].as_str(), Some(created_at.as_str()), "created_at must not change on update");
         assert!(updated_body["updated_at"].as_str().is_some());
+    }
+
+    /// カテゴリ(Redmine本家の「トラッカーの分類」相当、2026-07-31追加)が
+    /// プロジェクトの`category_defs`に含まれる名前のみ作成・更新の両方で
+    /// 受け付けられ、未定義の名前は`400`で拒否されることを確認する。
+    #[tokio::test]
+    async fn ticket_category_must_be_defined_on_the_project() {
+        let state = make_state("ticket-category", true).await;
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = poem::test::TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "category-proj", "category_defs": ["frontend", "backend"] }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 未定義カテゴリでの作成は400。
+        let rejected = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "t", "description": "d", "project_id": project_id, "category": "unknown" }))
+            .send()
+            .await;
+        rejected.assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        // 定義済みカテゴリでの作成は成功し、値が往復する。
+        let created = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "t", "description": "d", "project_id": project_id, "category": "backend" }))
+            .send()
+            .await;
+        created.assert_status(poem::http::StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json().await.value().deserialize();
+        assert_eq!(created_body["category"].as_str(), Some("backend"));
+        let ticket_id = created_body["id"].as_u64().unwrap();
+
+        // 更新でも未定義カテゴリは400、定義済みカテゴリへの変更は成功する。
+        let update_rejected = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "category": "unknown" }))
+            .send()
+            .await;
+        update_rejected.assert_status(poem::http::StatusCode::BAD_REQUEST);
+
+        let update_ok = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "category": "frontend" }))
+            .send()
+            .await;
+        update_ok.assert_status_is_ok();
+        let update_ok_body: serde_json::Value = update_ok.json().await.value().deserialize();
+        assert_eq!(update_ok_body["category"].as_str(), Some("frontend"));
     }
 }
