@@ -175,6 +175,22 @@ fn days_from_civil(date: &str) -> Option<i64> {
     Some(era * 146097 + doe - 719468)
 }
 
+/// `due_date`(`"YYYY-MM-DD"`)がブラウザの今日の日付より前(=期限超過)
+/// かどうかを判定する(一覧の赤字表示用、2026-07-31追加)。
+fn is_overdue(due_date: &str) -> bool {
+    let today = js_sys::Date::new_0();
+    let today_str = format!(
+        "{:04}-{:02}-{:02}",
+        today.get_full_year(),
+        today.get_month() + 1,
+        today.get_date()
+    );
+    match (days_from_civil(due_date), days_from_civil(&today_str)) {
+        (Some(due), Some(today)) => due < today,
+        _ => false,
+    }
+}
+
 /// ガントチャート用の1チケット分の内部表現。
 struct GanttEntry {
     title: String,
@@ -673,22 +689,28 @@ async fn load_tickets(project_id: u64) {
         let title = escape_html(t.get("title").and_then(|v| v.as_str()).unwrap_or(""));
         let status = escape_html(t.get("status").and_then(|v| v.as_str()).unwrap_or(""));
         let tracker = escape_html(t.get("tracker").and_then(|v| v.as_str()).unwrap_or("bug"));
-        let assignee_badge = match t.get("assignee").and_then(|v| v.as_str()) {
-            Some(a) => format!(r#" <span class="badge">{}</span>"#, escape_html(a)),
-            None => String::new(),
-        };
+        let assignee = t.get("assignee").and_then(|v| v.as_str()).unwrap_or("-");
         let done_ratio = t.get("done_ratio").and_then(|v| v.as_u64()).unwrap_or(0);
-        let due_date = t.get("due_date").and_then(|v| v.as_str());
-        let due_badge = match due_date {
-            Some(d) => format!(r#" <span class="badge">due {}</span>"#, escape_html(d)),
-            None => String::new(),
-        };
+        let due_date = t.get("due_date").and_then(|v| v.as_str()).unwrap_or("-");
+        // 期限日が今日以前(既に期限切れ)の場合は赤字で強調する
+        // (Redmine本家の「期限超過チケットの赤字表示」相当の視覚パターン)。
+        let due_class = if due_date != "-" && is_overdue(due_date) { " class=\"due-soon\"" } else { "" };
         html.push_str(&format!(
-            r#"<li><button class="link-btn" onclick="open_ticket({id})">{title}</button> <span class="badge">{tracker}</span> <span class="badge">{status}</span> <span class="badge">{done_ratio}%</span>{due_badge}{assignee_badge}</li>"#
+            r#"<tr>
+                <td class="ticket-id">#{id}</td>
+                <td><span class="tracker-tag tracker-{tracker}">{tracker}</span></td>
+                <td><span class="status-pill status-{status}">{status}</span></td>
+                <td><button class="link-btn" onclick="open_ticket({id})">{title}</button></td>
+                <td>{assignee_html}</td>
+                <td><div class="done-ratio-cell"><div class="done-ratio-track"><div class="done-ratio-fill" style="width:{done_ratio}%;"></div></div><span>{done_ratio}%</span></div></td>
+                <td{due_class}>{due_date_html}</td>
+            </tr>"#,
+            assignee_html = escape_html(assignee),
+            due_date_html = escape_html(due_date),
         ));
     }
     if html.is_empty() {
-        html = "<li class=\"muted\">チケットはまだありません</li>".to_string();
+        html = "<tr><td colspan=\"7\" class=\"muted\">No tickets yet (チケットはまだありません)</td></tr>".to_string();
     }
     set_html("ticket-list", &html);
     render_gantt_and_calendar(&project_tickets);

@@ -86,6 +86,49 @@
       }
       .muted { color: var(--muted); font-size: 0.9rem; }
       .hidden { display: none; }
+
+      /* Redmine本家のチケット一覧に近づけたテーブル形式(2026-07-31、
+         ユーザー指示「見た目の細部の詳細も何度か確認して本物に近づけて」
+         への対応)。本家はステータス毎の色分け・トラッカー毎のアイコン色を
+         使うため、同じ視覚パターンを独自の配色で再現する(本家の画像
+         そのものは一切参照・複製していない、色の役割分担のみ踏襲)。 */
+      .ticket-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+      .ticket-table th {
+        text-align: left;
+        font-weight: 600;
+        font-size: 0.75rem;
+        color: var(--muted);
+        border-bottom: 2px solid var(--border);
+        padding: 0.4rem 0.5rem;
+      }
+      .ticket-table td {
+        padding: 0.4rem 0.5rem;
+        border-bottom: 1px solid var(--border);
+        vertical-align: middle;
+      }
+      .ticket-table tr:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+      .ticket-id { color: var(--muted); font-size: 0.8rem; }
+      .tracker-tag { font-weight: 600; font-size: 0.8rem; }
+      .tracker-tag.tracker-bug { color: #c0392b; }
+      .tracker-tag.tracker-feature { color: #2471a3; }
+      .tracker-tag.tracker-support { color: #7d3c98; }
+      .tracker-tag.tracker-task { color: #5d6d7e; }
+      .status-pill {
+        display: inline-block;
+        font-size: 0.72rem;
+        border-radius: 3px;
+        padding: 0.1rem 0.5rem;
+        color: white;
+        white-space: nowrap;
+      }
+      .status-open { background: #7f8c8d; }
+      .status-in_progress { background: #d68910; }
+      .status-resolved { background: #17a589; }
+      .status-closed { background: #229954; }
+      .done-ratio-cell { display: flex; align-items: center; gap: 0.4rem; }
+      .done-ratio-track { flex: 1; height: 0.6rem; background: var(--border); border-radius: 3px; overflow: hidden; min-width: 3rem; }
+      .done-ratio-fill { height: 100%; background: #2f5aa8; }
+      .due-soon { color: #c0392b; font-weight: 600; }
       .gantt-row {
         display: grid;
         grid-template-columns: 12rem 1fr;
@@ -143,7 +186,22 @@
           <h2>Tickets (チケット)</h2>
           <p id="selected-project-label" class="muted">Select a project (プロジェクトを選択してください)</p>
           <input id="selected-project-id" type="hidden" value="" />
-          <ul id="ticket-list"></ul>
+          <div style="overflow-x:auto;">
+            <table class="ticket-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Tracker (トラッカー)</th>
+                  <th>Status (ステータス)</th>
+                  <th>Subject (件名)</th>
+                  <th>Assignee (担当者)</th>
+                  <th>% Done (進捗)</th>
+                  <th>Due (期限)</th>
+                </tr>
+              </thead>
+              <tbody id="ticket-list"></tbody>
+            </table>
+          </div>
           <input id="new-ticket-title" type="text" placeholder="Ticket title (チケット件名)" />
           <textarea id="new-ticket-description" placeholder="Description (詳細)" rows="3"></textarea>
           <label for="new-ticket-tracker">Tracker (トラッカー)</label>
