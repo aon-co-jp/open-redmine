@@ -82,6 +82,38 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-07-31(続き2) 優先度(Priority)フィールドを追加(ユーザー指示
+  「見た目・機能をopen-redmineに反映してほしい」、Redmine本家と同じ
+  5段階Low/Normal/High/Urgent/Immediateを選択)**:
+  1. **バックエンド**: `Priority` enum(`Low`/`Normal`/`High`/`Urgent`/
+     `Immediate`、既定`Normal`)を追加。`Ticket`・`CreateTicketRequest`・
+     `UpdateTicketRequest`に`priority`フィールドを追加(いずれも
+     `#[serde(default)]`で既存データとの後方互換を維持)。
+  2. **フロントエンド**: チケット新規作成フォーム・詳細編集
+     (Schedule & Progressセクション)の両方に優先度セレクトを追加。
+     一覧テーブルに優先度列を追加し、`.priority-low`(グレー)・
+     `.priority-normal`(既定色)・`.priority-high`(オレンジ太字)・
+     `.priority-urgent`(赤太字)・`.priority-immediate`(赤背景の
+     白文字バッジ)で色分け(Redmine本家の画像は一切参照・複製せず、
+     一般的な優先度配色の役割分担のみを独自配色で実装)。
+  3. **検証**: 新規テスト1件
+     (`ticket_priority_defaults_to_normal_and_is_settable_on_create_
+     and_update`——未指定時`normal`既定・作成時指定・更新時変更を実HTTP
+     リクエストで確認)、メインクレート`cargo test`**82→83件、全green**。
+     `web/`側`cargo test`4件全green(既存のまま、priority自体はJS↔WASM
+     境界の単純な値受け渡しのため専用ユニットテストは追加せず、
+     バックエンドの往復テストと実ブラウザ確認で担保)。
+     `cargo build --target wasm32-unknown-unknown --release`成功。
+     実バイナリを起動し、`curl`で`POST /api/tickets`に`priority`を
+     指定した作成が実際に保存・返却されること、配信HTMLに
+     `new-ticket-priority`/`edit-ticket-priority`/
+     `ticket-detail-priority`が実在することを確認。Claude Browser pane
+     でテーブル描画による5段階の色分け表示をスクリーンショットで確認
+     (DOM直接注入によるレンダリング確認、前回同様このセッション環境の
+     fetch計装制約により実クリックE2Eは未実施——正直な開示)。
+  - 次にすべきこと: (1) 本番へのデプロイ、(2) 本番環境での実クリック
+    E2E、(3) 優先度による一覧の絞り込み・並び替え(現状は表示のみ)。
+
 - **2026-07-31(続き) チケット一覧をRedmine本家に近いテーブル形式へ刷新
   (ユーザー指示「見た目の細部の詳細も何度か確認して本物に近づけて
   下さい」——Google画像検索での本家スクリーンショット参照依頼への対応、

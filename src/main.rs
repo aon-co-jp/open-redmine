@@ -345,6 +345,24 @@ impl Default for Tracker {
     }
 }
 
+/// チケットの優先度(Redmine本家と同じ5段階、2026-07-31追加)。既存
+/// チケットは`#[serde(default)]`で`Normal`扱いとして後方互換を保つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Priority {
+    Low,
+    Normal,
+    High,
+    Urgent,
+    Immediate,
+}
+
+impl Default for Priority {
+    fn default() -> Self {
+        Priority::Normal
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Ticket {
     id: u64,
@@ -354,6 +372,9 @@ struct Ticket {
     /// チケット種別(Redmine機能ギャップ対応、2026-07-26追加)。
     #[serde(default)]
     tracker: Tracker,
+    /// 優先度(Redmine機能ギャップ対応、2026-07-31追加)。
+    #[serde(default)]
+    priority: Priority,
     /// チケットが所属する`Project`の`id`(実体を持つ`project.rs`の
     /// `Project`エンティティを参照、旧`project: String`+ハッシュの
     /// 置き換え——CLAUDE.md HANDOFF「(3) Project自体のCRUD」対応)。
@@ -416,6 +437,8 @@ struct CreateTicketRequest {
     project_id: u64,
     #[serde(default)]
     tracker: Option<Tracker>,
+    #[serde(default)]
+    priority: Option<Priority>,
     #[serde(default)]
     start_date: Option<String>,
     #[serde(default)]
@@ -482,6 +505,7 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
         description: body.description.clone(),
         status: TicketStatus::Open,
         tracker: body.tracker.unwrap_or_default(),
+        priority: body.priority.unwrap_or_default(),
         project_id: body.project_id,
         start_date: body.start_date.clone(),
         due_date: body.due_date.clone(),
@@ -637,6 +661,8 @@ struct UpdateTicketRequest {
     #[serde(default)]
     tracker: Option<Tracker>,
     #[serde(default)]
+    priority: Option<Priority>,
+    #[serde(default)]
     start_date: Option<String>,
     #[serde(default)]
     due_date: Option<String>,
@@ -692,6 +718,9 @@ async fn update_ticket(
     }
     if let Some(tracker) = body.tracker {
         ticket.tracker = tracker;
+    }
+    if let Some(priority) = body.priority {
+        ticket.priority = priority;
     }
     if let Some(done_ratio) = body.done_ratio {
         if done_ratio_out_of_range(done_ratio) {
@@ -3412,5 +3441,59 @@ mod handler_tests {
         assert_eq!(reassigned_ticket["assignee"].as_str(), Some("admin@example.com"));
 
         let _ = data_root;
+    }
+
+    /// 優先度(Redmine本家と同じ5段階、2026-07-31追加)が既定値`normal`で
+    /// 作成され、作成時の明示指定・更新時の変更がいずれも反映されることを
+    /// 確認する。
+    #[tokio::test]
+    async fn ticket_priority_defaults_to_normal_and_is_settable_on_create_and_update() {
+        let state = make_state("ticket-priority", true).await;
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = poem::test::TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "priority-proj" }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // priority未指定時はnormalが既定値。
+        let default_created = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "default priority", "description": "d", "project_id": project_id }))
+            .send()
+            .await;
+        default_created.assert_status(poem::http::StatusCode::CREATED);
+        let default_body: serde_json::Value = default_created.json().await.value().deserialize();
+        assert_eq!(default_body["priority"].as_str(), Some("normal"));
+
+        // 作成時にpriorityを明示指定できる。
+        let urgent_created = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "urgent one", "description": "d", "project_id": project_id, "priority": "urgent" }))
+            .send()
+            .await;
+        urgent_created.assert_status(poem::http::StatusCode::CREATED);
+        let urgent_body: serde_json::Value = urgent_created.json().await.value().deserialize();
+        assert_eq!(urgent_body["priority"].as_str(), Some("urgent"));
+        let ticket_id = urgent_body["id"].as_u64().unwrap();
+
+        // 更新でpriorityを変更できる。
+        let updated = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "priority": "immediate" }))
+            .send()
+            .await;
+        updated.assert_status_is_ok();
+        let updated_body: serde_json::Value = updated.json().await.value().deserialize();
+        assert_eq!(updated_body["priority"].as_str(), Some("immediate"));
     }
 }

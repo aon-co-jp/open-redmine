@@ -381,6 +381,7 @@ fn wire_ticket_form() {
             let title = input_value("new-ticket-title");
             let description = textarea_value("new-ticket-description");
             let tracker = select_value("new-ticket-tracker");
+            let priority = select_value("new-ticket-priority");
             let assignee = input_value("new-ticket-assignee");
             let start_date = input_value("new-ticket-start-date");
             let due_date = input_value("new-ticket-due-date");
@@ -388,7 +389,7 @@ fn wire_ticket_form() {
             if title.trim().is_empty() {
                 return;
             }
-            let mut body_json = serde_json::json!({ "title": title, "description": description, "project_id": project_id, "tracker": tracker });
+            let mut body_json = serde_json::json!({ "title": title, "description": description, "project_id": project_id, "tracker": tracker, "priority": priority });
             // 担当者・開始日・期限日・進捗率はいずれも任意入力
             // (空欄なら送らない、サーバー側の`Option<...>`既定のまま)。
             if !assignee.trim().is_empty() {
@@ -468,6 +469,7 @@ fn wire_ticket_detail() {
             let start_date = input_value("edit-ticket-start-date");
             let due_date = input_value("edit-ticket-due-date");
             let done_ratio = input_value("edit-ticket-done-ratio");
+            let priority = select_value("edit-ticket-priority");
             let mut body_json = serde_json::json!({});
             if !start_date.trim().is_empty() {
                 body_json["start_date"] = serde_json::Value::String(start_date);
@@ -477,6 +479,9 @@ fn wire_ticket_detail() {
             }
             if let Ok(ratio) = done_ratio.trim().parse::<u64>() {
                 body_json["done_ratio"] = serde_json::Value::from(ratio);
+            }
+            if !priority.trim().is_empty() {
+                body_json["priority"] = serde_json::Value::String(priority);
             }
             let body = body_json.to_string();
             match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
@@ -689,6 +694,7 @@ async fn load_tickets(project_id: u64) {
         let title = escape_html(t.get("title").and_then(|v| v.as_str()).unwrap_or(""));
         let status = escape_html(t.get("status").and_then(|v| v.as_str()).unwrap_or(""));
         let tracker = escape_html(t.get("tracker").and_then(|v| v.as_str()).unwrap_or("bug"));
+        let priority = escape_html(t.get("priority").and_then(|v| v.as_str()).unwrap_or("normal"));
         let assignee = t.get("assignee").and_then(|v| v.as_str()).unwrap_or("-");
         let done_ratio = t.get("done_ratio").and_then(|v| v.as_u64()).unwrap_or(0);
         let due_date = t.get("due_date").and_then(|v| v.as_str()).unwrap_or("-");
@@ -699,6 +705,7 @@ async fn load_tickets(project_id: u64) {
             r#"<tr>
                 <td class="ticket-id">#{id}</td>
                 <td><span class="tracker-tag tracker-{tracker}">{tracker}</span></td>
+                <td><span class="priority-tag priority-{priority}">{priority}</span></td>
                 <td><span class="status-pill status-{status}">{status}</span></td>
                 <td><button class="link-btn" onclick="open_ticket({id})">{title}</button></td>
                 <td>{assignee_html}</td>
@@ -710,7 +717,7 @@ async fn load_tickets(project_id: u64) {
         ));
     }
     if html.is_empty() {
-        html = "<tr><td colspan=\"7\" class=\"muted\">No tickets yet (チケットはまだありません)</td></tr>".to_string();
+        html = "<tr><td colspan=\"8\" class=\"muted\">No tickets yet (チケットはまだありません)</td></tr>".to_string();
     }
     set_html("ticket-list", &html);
     render_gantt_and_calendar(&project_tickets);
@@ -744,16 +751,21 @@ pub fn open_ticket(ticket_id: u32) {
         let description = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
         let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("open");
         let tracker = t.get("tracker").and_then(|v| v.as_str()).unwrap_or("bug");
+        let priority = t.get("priority").and_then(|v| v.as_str()).unwrap_or("normal");
         let assignee = t.get("assignee").and_then(|v| v.as_str());
         let start_date = t.get("start_date").and_then(|v| v.as_str()).unwrap_or("");
         let due_date = t.get("due_date").and_then(|v| v.as_str()).unwrap_or("");
         let done_ratio = t.get("done_ratio").and_then(|v| v.as_u64()).unwrap_or(0);
         set_text("ticket-detail-title", title);
         set_text("ticket-detail-tracker", tracker);
+        set_text("ticket-detail-priority", priority);
         set_text("ticket-detail-assignee", assignee.unwrap_or("unassigned (未割当)"));
         set_text("ticket-detail-description", description);
         if let Ok(select) = by_id("ticket-status-select").dyn_into::<HtmlSelectElement>() {
             select.set_value(status);
+        }
+        if let Ok(select) = by_id("edit-ticket-priority").dyn_into::<HtmlSelectElement>() {
+            select.set_value(priority);
         }
         set_input_value("edit-ticket-start-date", start_date);
         set_input_value("edit-ticket-due-date", due_date);
