@@ -702,6 +702,7 @@ async fn load_tickets(project_id: u64) {
         let status = escape_html(t.get("status").and_then(|v| v.as_str()).unwrap_or(""));
         let tracker = escape_html(t.get("tracker").and_then(|v| v.as_str()).unwrap_or("bug"));
         let priority = escape_html(t.get("priority").and_then(|v| v.as_str()).unwrap_or("normal"));
+        let category = t.get("category").and_then(|v| v.as_str()).unwrap_or("-");
         let assignee = t.get("assignee").and_then(|v| v.as_str()).unwrap_or("-");
         let done_ratio = t.get("done_ratio").and_then(|v| v.as_u64()).unwrap_or(0);
         let due_date = t.get("due_date").and_then(|v| v.as_str()).unwrap_or("-");
@@ -716,18 +717,20 @@ async fn load_tickets(project_id: u64) {
                 <td><span class="priority-tag priority-{priority}">{priority}</span></td>
                 <td><span class="status-pill status-{status}">{status}</span></td>
                 <td><button class="link-btn" onclick="open_ticket({id})">{title}</button></td>
+                <td class="muted">{category_html}</td>
                 <td>{assignee_html}</td>
                 <td><div class="done-ratio-cell"><div class="done-ratio-track"><div class="done-ratio-fill" style="width:{done_ratio}%;"></div></div><span>{done_ratio}%</span></div></td>
                 <td{due_class}>{due_date_html}</td>
                 <td class="muted">{updated_at_html}</td>
             </tr>"#,
+            category_html = escape_html(category),
             assignee_html = escape_html(assignee),
             due_date_html = escape_html(due_date),
             updated_at_html = escape_html(updated_at),
         ));
     }
     if html.is_empty() {
-        html = "<tr><td colspan=\"9\" class=\"muted\">No tickets yet (チケットはまだありません)</td></tr>".to_string();
+        html = "<tr><td colspan=\"10\" class=\"muted\">No tickets yet (チケットはまだありません)</td></tr>".to_string();
     }
     set_html("ticket-list", &html);
     render_gantt_and_calendar(&project_tickets);

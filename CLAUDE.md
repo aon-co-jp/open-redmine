@@ -82,6 +82,35 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-07-31(続き4) カテゴリ(Category)フィールドを追加(ユーザー指示
+  「どんどん、Redmine本家の一般的なチケット一覧の構成に近づけて下さい」
+  →「進めて」)、セッション終了前の一時停止**:
+  1. **バックエンド**: `Project`に`category_defs: Vec<String>`
+     (`custom_field_defs`と同じ設計パターン、プロジェクトが選択可能な
+     カテゴリ名一覧)、`Ticket`に`category: Option<String>`を追加。
+     `create_ticket`/`update_ticket`双方で、指定した`category`が所属
+     プロジェクトの`category_defs`に含まれていなければ`400`で拒否する
+     (`custom_fields_are_defined`と同じ検証方針)。`CreateProjectRequest`/
+     `UpdateProjectRequest`にも`category_defs`を配線。
+  2. **フロントエンド**: 一覧テーブルに「Category (カテゴリ)」列を
+     追加(表示のみ)。**正直な開示**: カテゴリの作成・編集フォームでの
+     選択UIは今回追加していない——プロジェクトごとの`category_defs`
+     管理画面自体がまだ無く(`custom_field_defs`と同じ既存の未対応
+     スコープ)、選択肢を動的に出すUIを作るには先にその管理画面が必要
+     なため、今回は表示列のみに留めた。
+  3. **検証**: 新規テスト1件
+     (`ticket_category_must_be_defined_on_the_project`——未定義カテゴリ
+     での作成・更新がいずれも`400`、定義済みカテゴリでの作成・更新が
+     成功し値が往復することを実HTTPリクエストで確認)、メインクレート
+     `cargo test`**84→85件、全green**。`web/`側`cargo test`4件全green。
+     `cargo build --target wasm32-unknown-unknown --release`成功。
+     実バイナリを起動し、`curl`で`category`付きチケット作成が実際に
+     保存・返却されること、配信HTMLに「Category (カテゴリ)」列見出しが
+     存在することを確認。
+  - 次にすべきこと: (1) プロジェクトの`category_defs`/`custom_field_defs`
+    管理画面(web/側、現状いずれもAPIのみ)、(2) 一覧の列クリックソート、
+    (3) 本番へのデプロイ+実クリックE2E。
+
 - **2026-07-31(続き3) チケットに`created_at`/`updated_at`を追加+一覧に
   「更新日」列と既定ソート(更新日降順)を追加(ユーザー指示「どんどん、
   Redmine本家の一般的なチケット一覧の構成に近づけて下さい」——本家の
