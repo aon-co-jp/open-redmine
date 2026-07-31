@@ -82,6 +82,39 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-07-31(続き3) チケットに`created_at`/`updated_at`を追加+一覧に
+  「更新日」列と既定ソート(更新日降順)を追加(ユーザー指示「どんどん、
+  Redmine本家の一般的なチケット一覧の構成に近づけて下さい」——本家の
+  一覧はデフォルトで「更新日」列を持ち、直近更新順が上に来るのが一般的な
+  挙動のため対応)**:
+  1. **バックエンド**: `Ticket`に`created_at: String`/`updated_at:
+     String`を追加(`project::now_rfc3339()`と同形式、既存チケットは
+     `#[serde(default)]`で空文字列扱いとして後方互換を保つ)。
+     `create_ticket`で両方を作成時刻に設定、`update_ticket`は任意の
+     フィールド更新のたびに`updated_at`のみを現在時刻へ更新する
+     (`created_at`は不変)。
+  2. **フロントエンド**: 一覧テーブルに「Updated (更新日)」列を追加。
+     `load_tickets`が`project_tickets`を`updated_at`の降順(文字列比較、
+     ISO8601ライクな形式のため単純比較で正しく降順になる)でソートして
+     から描画するようにした(Redmine本家の一覧既定ソート相当)。
+  3. **検証**: 新規テスト1件
+     (`ticket_created_at_and_updated_at_are_tracked`——作成時に両方が
+     同じ値で設定されること、更新後は`updated_at`のみ変わり
+     `created_at`は不変であることを実HTTPリクエストで確認)、
+     メインクレート`cargo test`**83→84件、全green**(既存の直接
+     `Ticket{...}`構築箇所は無く、`#[serde(default)]`のみで無傷)。
+     `web/`側`cargo test`4件全green(既存のまま)。
+     `cargo build --target wasm32-unknown-unknown --release`成功。
+     実バイナリで`curl`により`created_at`/`updated_at`が実際に返却
+     されること、配信HTMLに「Updated (更新日)」列見出しが存在することを
+     確認。
+  4. **正直な開示**: (1) ソートは`updated_at`降順固定で、Redmine本家の
+     ような列クリックでの並び替え・昇順/降順切り替えは対象外。
+     (2) 一覧テーブルの他の列(ID等)でのソートも同様に未対応。
+  - 次にすべきこと: (1) 一覧の列ヘッダクリックによるソート機能、
+    (2) カテゴリ(Category)フィールドの追加検討、(3) 本番へのデプロイ+
+    実クリックE2E。
+
 - **2026-07-31(続き2) 優先度(Priority)フィールドを追加(ユーザー指示
   「見た目・機能をopen-redmineに反映してほしい」、Redmine本家と同じ
   5段階Low/Normal/High/Urgent/Immediateを選択)**:

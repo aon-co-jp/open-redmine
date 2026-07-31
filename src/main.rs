@@ -405,6 +405,14 @@ struct Ticket {
     /// リスト/日付〉別バリデーションは対象外、正直な開示)。
     #[serde(default)]
     custom_fields: std::collections::HashMap<String, String>,
+    /// 作成日時・更新日時(Redmine本家のチケット一覧「更新日」列相当、
+    /// 2026-07-31追加)。`project::now_rfc3339()`と同じ形式で保持する。
+    /// 既存チケットは`#[serde(default)]`で空文字列扱いとして後方互換を
+    /// 保つ(表示側は空文字列を`-`として扱う)。
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -499,6 +507,7 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
     let mut store = load_tickets(&state.data_root).await;
     let id = store.next_id;
     store.next_id += 1;
+    let now = project::now_rfc3339();
     let ticket = Ticket {
         id,
         title: body.title.clone(),
@@ -512,6 +521,8 @@ async fn create_ticket(req: &Request, state: Data<&AppState>, body: poem::web::J
         done_ratio,
         assignee: body.assignee.clone(),
         custom_fields: body.custom_fields.clone(),
+        created_at: now.clone(),
+        updated_at: now,
     };
     store.tickets.push(ticket.clone());
     save_tickets(&state.data_root, &store)
@@ -740,6 +751,7 @@ async fn update_ticket(
     if let Some(fields) = &body.custom_fields {
         ticket.custom_fields = fields.clone();
     }
+    ticket.updated_at = project::now_rfc3339();
     let updated = ticket.clone();
     save_tickets(&state.data_root, &store)
         .await
@@ -3495,5 +3507,50 @@ mod handler_tests {
         updated.assert_status_is_ok();
         let updated_body: serde_json::Value = updated.json().await.value().deserialize();
         assert_eq!(updated_body["priority"].as_str(), Some("immediate"));
+    }
+
+    /// チケットの`created_at`/`updated_at`(Redmine本家の一覧「更新日」列
+    /// 相当、2026-07-31追加)が作成時に設定され、更新のたびに
+    /// `updated_at`だけが変わり`created_at`は不変であることを確認する。
+    #[tokio::test]
+    async fn ticket_created_at_and_updated_at_are_tracked() {
+        let state = make_state("ticket-timestamps", true).await;
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = poem::test::TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "timestamps-proj" }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        let created = client
+            .post("/api/tickets")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "title": "t", "description": "d", "project_id": project_id }))
+            .send()
+            .await;
+        created.assert_status(poem::http::StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json().await.value().deserialize();
+        let created_at = created_body["created_at"].as_str().unwrap().to_string();
+        let first_updated_at = created_body["updated_at"].as_str().unwrap().to_string();
+        assert!(!created_at.is_empty());
+        assert_eq!(created_at, first_updated_at, "creation sets both timestamps to the same value");
+        let ticket_id = created_body["id"].as_u64().unwrap();
+
+        let updated = client
+            .put(format!("/api/tickets/{ticket_id}"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "done_ratio": 50 }))
+            .send()
+            .await;
+        updated.assert_status_is_ok();
+        let updated_body: serde_json::Value = updated.json().await.value().deserialize();
+        assert_eq!(updated_body["created_at"].as_str(), Some(created_at.as_str()), "created_at must not change on update");
+        assert!(updated_body["updated_at"].as_str().is_some());
     }
 }
