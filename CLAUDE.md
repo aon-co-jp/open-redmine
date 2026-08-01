@@ -82,6 +82,46 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-08-01(続き3) 「省機能+省メモリ版に切替」ボタンを追加
+  (エコシステム標準方針、`open-raid-z/CLAUDE.md`「GUIを持つ全リポジトリに
+  『省機能+省メモリ版に切替』ボタンを設置する」対応、`open-easy-web`の
+  先行実装パターンを踏襲)**:
+  1. **設計判断(正直な開示)**: このアプリにはバックグラウンドポーリング
+     ループが無い(チケット管理は都度のリクエスト駆動)ため、
+     `open-easy-web`の`power_profile.rs`のようなバックエンド電源
+     プロファイルAPIをそのまま移植しても実効果が無い。代わりに実際に
+     効果のある2点だけを実装した: (a)「省機能」は非必須セクション
+     (GitHub連携・ガントチャート・Wiki、`github-section`/
+     `gantt-section`/`wiki-section`)を`show()`でDOMから隠す
+     (レンダリングコストを下げる)、(b)「省メモリ」はプロジェクト選択時の
+     GitHubコミット自動取得を止め、手動の「更新」ボタンのみで取得する
+     ようにする(都度のAPI呼び出し・パース処理を削減)。ログイン・
+     チケット管理そのものは両モードとも常に有効(必須機能、非表示
+     対象から除外)。
+  2. **実装**: `web/src/lib.rs`に`FEATURE_MODE_KEY`
+     (`localStorage`、`"normal"`/`"memory_saver"`/`"minimal"`の3値)・
+     `apply_feature_mode()`・`wire_feature_mode()`を追加。`web/
+     index.html`に`#power-profile-section`(3ボタン+状態表示)を新設し、
+     `github-section`と揃える形で`wiki-section`のsection要素にも新規
+     `id`を付与(以前は無名だった)。
+  3. **検証**: `cargo build --target wasm32-unknown-unknown --release`
+     警告0件(既存の無関係な警告3件のみ)、`cargo test`(web/側)4件全
+     green(回帰なし、DOM非依存の既存ロジックテストのみのため今回の
+     変更に対する新規ユニットテストは追加していない——DOM依存部分は
+     下記の実ブラウザ確認で裏取り)。**ローカルで実際にブラウザ操作で
+     確認**(`BASE_PATH`を一時的に空文字にしてローカルの
+     `/`マウントでテスト、確認後は元の`/open-redmine`へ戻し
+     コミット差分に残らないことを確認済み——前々回エントリと同じ手法):
+     (a) 「省機能+省メモリ版に変更」クリック→`github-section`/
+     `gantt-section`/`wiki-section`の`getComputedStyle().display`が
+     実際に`none`になることをJS評価で確認、(b)「全機能を復元」で
+     `block`に戻ることを確認、(c)「省メモリ版に変更」→ページを実際に
+     リロードしても`localStorage`の値に基づき状態(ステータス文言・
+     GitHub連携セクションの表示)が正しく復元されることを確認。
+  - 次にすべきこと: (1) 本番へのデプロイ、(2) 他のGUIを持つリポジトリ
+    (`rs-link-fusion`等)への同パターン展開(`open-raid-z/CLAUDE.md`の
+    段階的着手方針の続き)。
+
 - **2026-08-01(続き) GitHub Webhook受信によるリアルタイム更新(前々回
   エントリの「次にすべきこと(2)」対応)**: 新設`src/github_webhook.rs`。
   1. **署名検証**: `POST /api/github/webhook`は`X-Hub-Signature-256`
