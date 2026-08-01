@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GithubCommit {
     pub sha: String,
     pub message: String,
@@ -41,7 +41,7 @@ struct GhCommitEntry {
 /// コミットメッセージから`#123`形式のチケット参照を抽出する
 /// (数字の直前が`#`、直後が数字である最長の連続数字列を1つの参照として
 /// 扱う、簡易実装)。
-fn parse_referenced_ticket_ids(message: &str) -> Vec<u64> {
+pub fn parse_referenced_ticket_ids(message: &str) -> Vec<u64> {
     let mut ids = Vec::new();
     let chars: Vec<char> = message.chars().collect();
     let mut i = 0;
