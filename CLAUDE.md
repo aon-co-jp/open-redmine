@@ -124,6 +124,32 @@ VPS上の作業パス: `/root/open-redmine`。
     エントリのバッジクリックE2E自体は今回ローカルで確認できたため
     完了、本番環境での同等確認は本項目(1)と合わせて実施。
 
+- **2026-08-01(続き2) 本番デプロイ+GitHub側Webhook登録を試行、権限不足で
+  ブロック(正直な開示)**: 上記機能を本番(`easy-web.tokyo/open-redmine`)
+  へデプロイ(`git pull`→`cargo build --release`→
+  `systemctl restart open-redmine.service`、`curl`で200確認)。
+  `RSCHIKETTO_GITHUB_WEBHOOK_SECRET`を`openssl rand -hex 32`で生成し
+  `/etc/systemd/system/open-redmine.service.d/webhook-secret.conf`
+  (systemd drop-in)に設定・反映済み(生成した値は
+  `/root/.open-redmine-webhook-secret`にも保存、`chmod 600`)。
+  **GitHub側へのWebhook登録自体は失敗**: VPS上の`~/.git-credentials`に
+  保存済みのfine-grained PAT(git push/pull用)で`POST /repos/aon-co-jp/
+  open-redmine/hooks`を呼んだところ`403 Resource not accessible by
+  personal access token`——このPATには`Webhooks`(Administration相当)
+  権限が付与されていないため。これはエージェント側の権限では解決
+  できない(PATのスコープ変更はGitHub側の設定画面でユーザー本人が
+  行う必要がある)。
+  - 次にすべきこと: 以下いずれかをユーザーに実施してもらう:
+    (a) `https://github.com/aon-co-jp/open-redmine/settings/hooks/new`
+    から手動でWebhookを追加(Payload URL:
+    `https://easy-web.tokyo/open-redmine/api/github/webhook`、
+    Content type: `application/json`、Secret:
+    `/root/.open-redmine-webhook-secret`の値〈VPS上にのみ保存、
+    このセッションの出力には含めていない〉、Event: `push`のみ)、
+    (b) または既存のfine-grained PATに`Webhooks`(read/write)権限を
+    追加する。いずれかの後、実際に1件pushしてWebhookの配信ログ
+    (GitHub側`Recent Deliveries`)が`200`になることを確認すること。
+
 - **2026-08-01 GitHubコミットの参照チケットバッジをクリック可能に(直前
   エントリ「続き6」の「次にすべきこと(2)」への対応)**: `web/src/lib.rs`
   の`load_github_commits`で、コミットメッセージから抽出した参照チケット
