@@ -103,7 +103,14 @@ VPS上の作業パス: `/root/open-redmine`。
   github/gantt/wikiの3セクションが`display:none`に→「全機能を復元」→
   全てのチェックが外れ`display:block`に戻ることを`getComputedStyle`で
   確認、`open-gitea`と同じ検証手法)。
-  - 次にすべきこと: 本番へのデプロイ。
+  - 次にすべきこと: 特に緊急の課題は無い。
+
+- **2026-08-01(続き6) 本番デプロイ完了**: `git pull`→`cargo build
+  --target wasm32-unknown-unknown --release`→
+  `systemctl restart open-redmine.service`。`curl https://easy-web.
+  tokyo/open-redmine/`のHTML本文に`profile-power-save`/
+  `profile-memory-saver`/`profile-always-on`が実際に含まれることを
+  確認。
 
 - **2026-08-01(続き3) 「省機能+省メモリ版に切替」ボタンを追加
   (エコシステム標準方針、`open-raid-z/CLAUDE.md`「GUIを持つ全リポジトリに
