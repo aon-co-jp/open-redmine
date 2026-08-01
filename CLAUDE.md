@@ -82,6 +82,25 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-08-01 GitHubコミットの参照チケットバッジをクリック可能に(直前
+  エントリ「続き6」の「次にすべきこと(2)」への対応)**: `web/src/lib.rs`
+  の`load_github_commits`で、コミットメッセージから抽出した参照チケット
+  バッジ(`#123`)を`<span>`から`<button class="badge link-btn"
+  onclick="open_ticket({ticket_id})">`へ変更。既存の関連チケット一覧
+  (`open_ticket`をボタンから呼ぶ既存パターン、`lib.rs:917`)と同じ導線を
+  再利用しただけで新規JS/API追加は無し。存在しない/別プロジェクトの
+  チケットIDを踏んだ場合は`open_ticket`が`404`で静かに何もしない
+  (既存の関連チケットリンクと同じフェイルセーフ挙動、新規ハンドリング
+  不要)。
+  検証: `cargo build --target wasm32-unknown-unknown --release`成功、
+  `cargo test`(web/側)4件全green(既存のまま、ロジック変更が無いため
+  新規テストは追加していない)。`wasm-bindgen --target web`で`pkg/`を
+  再生成(diffはwasmバイナリのみ、`.js`/`.d.ts`は既存生成と同一)。
+  - 次にすべきこと: (1) 本番へのデプロイ+実クリックE2E(バッジクリック
+    →チケット詳細パネル表示の実ブラウザ確認、このセッションでは
+    Claude Browser paneでの実クリックは未実施)、(2) Webhook受信による
+    リアルタイム更新(将来検討、続き6から継続)。
+
 - **2026-07-31(続き6) GitHubリポジトリ連携機能を追加(ユーザー指示
   「REDMINEの様にGithubとの連携機能を追加して」——Redmine本家のSCM
   (リポジトリ)連携相当)**:

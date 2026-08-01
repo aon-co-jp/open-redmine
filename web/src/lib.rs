@@ -727,7 +727,9 @@ async fn load_github_commits(project_id: u64) {
                 let mut ref_badges = String::new();
                 for r in &refs {
                     if let Some(ticket_id) = r.as_u64() {
-                        ref_badges.push_str(&format!(r#" <span class="badge">#{ticket_id}</span>"#));
+                        ref_badges.push_str(&format!(
+                            r#" <button class="badge link-btn" onclick="open_ticket({ticket_id})">#{ticket_id}</button>"#
+                        ));
                     }
                 }
                 html.push_str(&format!(
