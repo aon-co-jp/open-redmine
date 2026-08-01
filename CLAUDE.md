@@ -82,6 +82,48 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-08-01(続き) GitHub Webhook受信によるリアルタイム更新(前々回
+  エントリの「次にすべきこと(2)」対応)**: 新設`src/github_webhook.rs`。
+  1. **署名検証**: `POST /api/github/webhook`は`X-Hub-Signature-256`
+     (HMAC-SHA256、`hmac`クレート新規依存、定数時間比較の
+     `Mac::verify_slice`を使用——自前のバイト比較は行わない)で検証する。
+     `RSCHIKETTO_GITHUB_WEBHOOK_SECRET`環境変数が未設定の場合はWebhook
+     自体を無効として`501`(検証キーが無い状態で任意ペイロードを信用
+     しないため、なりすまし防止)。署名不一致は`401`。
+  2. **push受信→キャッシュ**: `push`イベントのペイロード(`repository.
+     full_name`+`commits[]`)をパースし、リポジトリごとに最大30件
+     (GitHub APIの1ページ分と同じ上限)キャッシュに前置保存
+     (`data/github_webhook_cache.json`、既存の`attachments.rs`と同じ
+     `StorageBackend`経由JSON永続化パターン)。
+  3. **`list_github_commits`の変更**: プロジェクトの`github_repo`に
+     対応するキャッシュが存在(非空)すればそれを返し、無ければ従来通り
+     GitHub APIへ都度問い合わせる(完全に後方互換、Webhook未設定の
+     プロジェクトは無変更で動作)。
+  4. **検証(実測)**: 新規ユニットテスト3件(署名の正当性/改ざん検知/
+     フォーマット不正の3パターン、push→パース→新しい順への並べ替え、
+     マージ+30件上限)、メインクレート`cargo test`**91件全green**
+     (88→91)。さらに**ローカルで実際にHTTPサーバーを起動し**、
+     (a) `openssl dgst -sha256 -hmac`で実際にHMAC署名を計算した
+     Webhookペイロードを`curl`で送信→`200`、(b) 直後に
+     `GET /api/projects/:id/github/commits`が(GitHub APIを叩かず)
+     このキャッシュ内容をそのまま返すことを確認、(c) 不正な署名では
+     `401`になることを確認、(d) **Claude Browser paneで実際にログイン
+     →プロジェクト画面を開き、Webhookで注入したコミットの参照チケット
+     バッジ`#0`を実クリック→チケット詳細パネルに正しいチケットが
+     開くことを確認**(前回エントリで本番デプロイ待ちだった実クリック
+     E2Eを、ローカル環境で完了)。ローカルテストのみ`BASE_PATH`を一時的に
+     空文字へ書き換えて検証し(本番の`/open-redmine`マウントとローカルの
+     ルートマウントの差を吸収するため)、確認後は`git diff`で
+     コミット前に必ず元の値へ戻したことを確認済み(commit差分には
+     含まれない)。
+  - 次にすべきこと: (1) 本番でも実際にGitHub側のWebhook設定
+    (Settings → Webhooks → Payload URL: `https://easy-web.tokyo/
+    open-redmine/api/github/webhook`、Secret設定必須)を行い、実際の
+    pushで反映されることを確認(このセッションでは自前の`curl`による
+    模擬pushのみ、GitHub側の実際のWebhook配信は未確認)、(2) 前回
+    エントリのバッジクリックE2E自体は今回ローカルで確認できたため
+    完了、本番環境での同等確認は本項目(1)と合わせて実施。
+
 - **2026-08-01 GitHubコミットの参照チケットバッジをクリック可能に(直前
   エントリ「続き6」の「次にすべきこと(2)」への対応)**: `web/src/lib.rs`
   の`load_github_commits`で、コミットメッセージから抽出した参照チケット

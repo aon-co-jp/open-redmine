@@ -27,6 +27,7 @@ mod auth;
 mod comments;
 mod ddns;
 mod github;
+mod github_webhook;
 mod mail;
 mod project;
 mod relations;
@@ -1850,6 +1851,12 @@ async fn run_saved_query(req: &Request, PathExtractor(id): PathExtractor<u64>, s
 /// 追加)。プロジェクトへの`Need::View`権限が必要(既存のチケット閲覧と
 /// 同じアクセス制御を再利用)。プロジェクトに`github_repo`が未設定なら
 /// `404`、GitHub API呼び出しに失敗した場合は`502`で理由を返す。
+///
+/// 2026-08-01追記: Webhook経由でこのリポジトリ宛のキャッシュ
+/// (`github_webhook.rs`)が存在すればそちらを優先して返す——push直後の
+/// 反映が即時になり、GitHub APIへの都度問い合わせ(レート制限あり)も
+/// 避けられる。キャッシュが無い(Webhook未設定)プロジェクトは従来通り
+/// 都度GitHub APIへ問い合わせる、完全に後方互換。
 #[handler]
 async fn list_github_commits(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
     let projects = project::load(&state.data_root, state.backend.as_ref()).await;
@@ -1860,11 +1867,44 @@ async fn list_github_commits(req: &Request, PathExtractor(id): PathExtractor<u64
     let Some(repo_spec) = &project.github_repo else {
         return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("this project has no github_repo configured"));
     };
+    let cache = github_webhook::load(&state.data_root, state.backend.as_ref()).await;
+    if let Some(cached) = cache.by_repo.get(repo_spec) {
+        if !cached.is_empty() {
+            return Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(cached).unwrap_or_default()));
+        }
+    }
     let token = std::env::var("RSCHIKETTO_GITHUB_TOKEN").ok();
     match github::fetch_recent_commits(repo_spec, token.as_deref()).await {
         Ok(commits) => Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&commits).unwrap_or_default())),
         Err(e) => Ok(Response::builder().status(poem::http::StatusCode::BAD_GATEWAY).body(format!("github fetch failed: {e}"))),
     }
+}
+
+/// `POST /api/github/webhook` — GitHubの`push`イベントWebhookを受信する
+/// (2026-08-01追加、認証セッション不要——GitHub側からの直接呼び出しの
+/// ため、代わりに`X-Hub-Signature-256`のHMAC署名で検証する)。
+/// `RSCHIKETTO_GITHUB_WEBHOOK_SECRET`が未設定の場合はWebhook機能自体を
+/// 無効として`501`を返す(検証キーが無い状態で任意ペイロードを信用
+/// しないため)。署名不一致は`401`、ペイロードのパース失敗は`400`。
+#[handler]
+async fn receive_github_webhook(req: &Request, body: String, state: Data<&AppState>) -> PoemResult<Response> {
+    let Ok(secret) = std::env::var("RSCHIKETTO_GITHUB_WEBHOOK_SECRET") else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_IMPLEMENTED).body("RSCHIKETTO_GITHUB_WEBHOOK_SECRET is not configured"));
+    };
+    let signature = req.headers().get("x-hub-signature-256").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !github_webhook::verify_signature(&secret, body.as_bytes(), signature) {
+        return Ok(Response::builder().status(poem::http::StatusCode::UNAUTHORIZED).body("invalid or missing X-Hub-Signature-256"));
+    }
+    let (repo_spec, commits) = match github_webhook::parse_push_event(body.as_bytes()) {
+        Ok(v) => v,
+        Err(e) => return Ok(Response::builder().status(poem::http::StatusCode::BAD_REQUEST).body(format!("invalid push event payload: {e}"))),
+    };
+    let mut cache = github_webhook::load(&state.data_root, state.backend.as_ref()).await;
+    github_webhook::merge_commits(&mut cache, repo_spec, commits);
+    github_webhook::save(&state.data_root, &cache, state.backend.as_ref())
+        .await
+        .map_err(|e| poem::Error::from_string(e.to_string(), poem::http::StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Response::builder().status(poem::http::StatusCode::OK).body("ok"))
 }
 
 fn env_data_dir() -> PathBuf {
@@ -1905,6 +1945,7 @@ fn build_routes(state: AppState) -> impl poem::Endpoint {
         .at("/api/saved_queries/:id", delete(delete_saved_query))
         .at("/api/saved_queries/:id/run", get(run_saved_query))
         .at("/api/projects/:id/github/commits", get(list_github_commits))
+        .at("/api/github/webhook", post(receive_github_webhook))
         .data(state)
         .with(Tracing)
 }
