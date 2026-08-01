@@ -82,6 +82,37 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-07-31(続き5) プロジェクトのカテゴリ・カスタムフィールド定義を
+  web側で作成可能に(直前エントリの「次にすべきこと(1) 管理画面」への
+  部分対応、セッション再開)**:
+  1. **プロジェクト作成フォーム**にカンマ区切り入力欄を2つ追加
+     (`new-project-categories`/`new-project-custom-fields`)。
+     `comma_list()`ヘルパー(前後空白除去・空要素除外)でパースし、
+     `POST /api/projects`の`category_defs`/`custom_field_defs`へ渡す。
+  2. **チケット作成フォームにカテゴリ選択`<select>`を追加**
+     (`new-ticket-category`)。`select_project`(プロジェクト選択時)で
+     新設の`load_project_categories()`が`GET /api/projects/:id`を叩き、
+     そのプロジェクトの`category_defs`を選択肢として動的に再構築する
+     (プロジェクトを跨いでも常に選択中プロジェクトのカテゴリのみが
+     表示される)。空欄選択時はカテゴリなしとして送信(サーバー側検証を
+     誘発しない)。
+  3. **正直な開示・残る範囲**: (1) 既存プロジェクトへのカテゴリ・
+     カスタムフィールド定義の**編集**(作成後の追加・削除)UIはまだ無い
+     (`PUT /api/projects/:id`はAPIとしては対応済みだがweb側フォーム
+     なし)。(2) カスタムフィールドの値自体を入力するUI(チケット作成/
+     編集フォーム側)は今回も追加していない——定義側(プロジェクトの
+     `custom_field_defs`)の作成のみ対応、値の入力欄は次回課題。
+  4. **検証**: メインクレート`cargo test`85件全green(バックエンド
+     変更なし、回帰確認のみ)。`web/`側`cargo test`4件全green。
+     `cargo build --target wasm32-unknown-unknown --release`成功。
+     実バイナリを起動し、`curl`で`category_defs`/`custom_field_defs`
+     付きプロジェクト作成が実際に保存・返却されること、配信HTMLに
+     `new-project-categories`/`new-project-custom-fields`/
+     `new-ticket-category`が実在することを確認。
+  - 次にすべきこと: (1) 既存プロジェクトのカテゴリ・カスタムフィールド
+    定義編集UI、(2) カスタムフィールド値の入力UI(チケット作成/編集)、
+    (3) 一覧テーブルの列クリックソート、(4) 本番へのデプロイ+実クリックE2E。
+
 - **2026-07-31(続き4) カテゴリ(Category)フィールドを追加(ユーザー指示
   「どんどん、Redmine本家の一般的なチケット一覧の構成に近づけて下さい」
   →「進めて」)、セッション終了前の一時停止**:
