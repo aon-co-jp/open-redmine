@@ -26,6 +26,7 @@ mod attachments;
 mod auth;
 mod comments;
 mod ddns;
+mod github;
 mod mail;
 mod project;
 mod relations;
@@ -148,6 +149,9 @@ struct CreateProjectRequest {
     /// (2026-07-31追加)。
     #[serde(default)]
     category_defs: Vec<String>,
+    /// 連携するGitHubリポジトリ(`"owner/repo"`形式、2026-07-31追加)。
+    #[serde(default)]
+    github_repo: Option<String>,
 }
 
 /// `POST /api/projects` — プロジェクトを新規作成する(管理者のみ、
@@ -177,6 +181,7 @@ async fn create_project(req: &Request, state: Data<&AppState>, body: poem::web::
         parent_id: body.parent_id,
         custom_field_defs: body.custom_field_defs.clone(),
         category_defs: body.category_defs.clone(),
+        github_repo: body.github_repo.clone(),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -228,6 +233,18 @@ struct UpdateProjectRequest {
     /// 同じ「既存チケットの値は削除しない」方針、2026-07-31追加)。
     #[serde(default)]
     category_defs: Option<Vec<String>>,
+    /// 連携するGitHubリポジトリの置き換え(`Some(Some(v))`で設定、
+    /// `Some(None)`で連携解除、フィールド省略は変更なし——`parent_id`と
+    /// 同じ二重`Option`パターン、2026-07-31追加)。
+    #[serde(default, deserialize_with = "deserialize_double_option_string")]
+    github_repo: Option<Option<String>>,
+}
+
+fn deserialize_double_option_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 /// 二重`Option`のデシリアライズ補助: フィールド省略は`None`
@@ -278,6 +295,9 @@ async fn update_project(
     }
     if let Some(new_parent) = body.parent_id {
         proj.parent_id = new_parent;
+    }
+    if let Some(new_repo) = body.github_repo.clone() {
+        proj.github_repo = new_repo;
     }
     if let Some(defs) = &body.category_defs {
         proj.category_defs = defs.clone();
@@ -1825,6 +1845,28 @@ async fn run_saved_query(req: &Request, PathExtractor(id): PathExtractor<u64>, s
     Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&visible).unwrap_or_default()))
 }
 
+/// `GET /api/projects/:id/github/commits` — 連携中のGitHubリポジトリの
+/// 直近コミット一覧を取得する(Redmine本家のSCM連携相当、2026-07-31
+/// 追加)。プロジェクトへの`Need::View`権限が必要(既存のチケット閲覧と
+/// 同じアクセス制御を再利用)。プロジェクトに`github_repo`が未設定なら
+/// `404`、GitHub API呼び出しに失敗した場合は`502`で理由を返す。
+#[handler]
+async fn list_github_commits(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
+    let projects = project::load(&state.data_root, state.backend.as_ref()).await;
+    let Some(project) = projects.find(id) else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("project not found"));
+    };
+    check_project_access(req, &state, id, access::Need::View).await?;
+    let Some(repo_spec) = &project.github_repo else {
+        return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("this project has no github_repo configured"));
+    };
+    let token = std::env::var("RSCHIKETTO_GITHUB_TOKEN").ok();
+    match github::fetch_recent_commits(repo_spec, token.as_deref()).await {
+        Ok(commits) => Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&commits).unwrap_or_default())),
+        Err(e) => Ok(Response::builder().status(poem::http::StatusCode::BAD_GATEWAY).body(format!("github fetch failed: {e}"))),
+    }
+}
+
 fn env_data_dir() -> PathBuf {
     std::env::var("RSCHIKETTO_DATA_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("./data"))
 }
@@ -1862,6 +1904,7 @@ fn build_routes(state: AppState) -> impl poem::Endpoint {
         .at("/api/saved_queries", get(list_saved_queries).post(create_saved_query))
         .at("/api/saved_queries/:id", delete(delete_saved_query))
         .at("/api/saved_queries/:id/run", get(run_saved_query))
+        .at("/api/projects/:id/github/commits", get(list_github_commits))
         .data(state)
         .with(Tracing)
 }
@@ -3650,5 +3693,48 @@ mod handler_tests {
         update_ok.assert_status_is_ok();
         let update_ok_body: serde_json::Value = update_ok.json().await.value().deserialize();
         assert_eq!(update_ok_body["category"].as_str(), Some("frontend"));
+    }
+
+    /// GitHub連携(Redmine本家のSCM連携相当、2026-07-31追加)。
+    /// `github_repo`が未設定のプロジェクトへのコミット取得は`404`、
+    /// 未ログインでの閲覧は`401`になることを確認する(実GitHub APIへの
+    /// 到達を伴う正常系は、この環境からの実ネットワーク呼び出しに
+    /// レート制限・フレーキーさの懸念があるため対象外——正直な開示。
+    /// パース・バリデーションロジック自体は`github.rs`の単体テストで
+    /// 別途検証済み)。
+    #[tokio::test]
+    async fn github_commits_endpoint_requires_login_and_a_configured_repo() {
+        let state = make_state("github-commits", true).await;
+        let admin = admin_token(&state);
+        let app = build_routes(state);
+        let client = poem::test::TestClient::new(app);
+
+        let project = client
+            .post("/api/projects")
+            .header("Authorization", format!("Bearer {admin}"))
+            .body_json(&serde_json::json!({ "name": "gh-proj" }))
+            .send()
+            .await;
+        project.assert_status(poem::http::StatusCode::CREATED);
+        let project_id = project.json().await.value().deserialize::<serde_json::Value>()["id"].as_u64().unwrap();
+
+        // 未ログインは401(存在確認より先に認証チェックが走る既存パターン)。
+        client.get(format!("/api/projects/{project_id}/github/commits")).send().await.assert_status(poem::http::StatusCode::UNAUTHORIZED);
+
+        // ログイン済みだが github_repo 未設定のプロジェクトは404。
+        client
+            .get(format!("/api/projects/{project_id}/github/commits"))
+            .header("Authorization", format!("Bearer {admin}"))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::NOT_FOUND);
+
+        // 存在しないプロジェクトも404。
+        client
+            .get("/api/projects/999999/github/commits")
+            .header("Authorization", format!("Bearer {admin}"))
+            .send()
+            .await
+            .assert_status(poem::http::StatusCode::NOT_FOUND);
     }
 }

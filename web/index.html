@@ -189,7 +189,25 @@
           <input id="new-project-categories" type="text" placeholder="e.g. frontend,backend (例: frontend,backend)" />
           <label for="new-project-custom-fields">Custom field names, comma-separated, optional (カスタムフィールド名・カンマ区切り・任意)</label>
           <input id="new-project-custom-fields" type="text" placeholder="e.g. severity,customer (例: severity,customer)" />
+          <label for="new-project-github-repo">GitHub repo, optional (GitHubリポジトリ・任意)</label>
+          <input id="new-project-github-repo" type="text" placeholder="owner/repo, e.g. aon-co-jp/open-redmine (例: aon-co-jp/open-redmine)" />
           <button id="create-project-btn">Create project (プロジェクト作成)</button>
+        </section>
+
+        <section id="github-section">
+          <h2>GitHub commits (GitHubコミット連携)</h2>
+          <p class="muted">
+            Shows the latest commits from the selected project's linked
+            GitHub repository (set when creating the project). Commit
+            messages containing "#123" are linked to that ticket number
+            (Redmine-style issue references).<br>
+            選択中プロジェクトに連携設定されたGitHubリポジトリの直近
+            コミットを表示します(プロジェクト作成時に設定)。コミット
+            メッセージ中の「#123」はそのチケット番号への参照として
+            表示されます(Redmine本家のissue参照表記と同じ形式)。
+          </p>
+          <button id="refresh-github-commits-btn">Refresh (更新)</button>
+          <ul id="github-commit-list" class="muted"></ul>
         </section>
 
         <section>
