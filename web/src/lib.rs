@@ -145,6 +145,13 @@ async fn api(method: &str, path: &str, body: Option<String>) -> Result<(u16, Str
     Ok((status, text))
 }
 
+/// カンマ区切りの入力値(前後の空白は無視、空要素は除外)を
+/// `Vec<String>`へ変換する(プロジェクトのカテゴリ・カスタムフィールド
+/// 定義入力、2026-07-31追加)。
+fn comma_list(s: &str) -> Vec<String> {
+    s.split(',').map(|part| part.trim().to_string()).filter(|part| !part.is_empty()).collect()
+}
+
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
@@ -361,9 +368,13 @@ fn wire_project_form() {
             if name.trim().is_empty() {
                 return;
             }
-            let body = serde_json::json!({ "name": name }).to_string();
+            let categories = comma_list(&input_value("new-project-categories"));
+            let custom_fields = comma_list(&input_value("new-project-custom-fields"));
+            let body = serde_json::json!({ "name": name, "category_defs": categories, "custom_field_defs": custom_fields }).to_string();
             if let Ok((201, _)) = api("POST", "/api/projects", Some(body)).await {
                 set_input_value("new-project-name", "");
+                set_input_value("new-project-categories", "");
+                set_input_value("new-project-custom-fields", "");
                 load_projects().await;
             }
         });
@@ -382,6 +393,7 @@ fn wire_ticket_form() {
             let description = textarea_value("new-ticket-description");
             let tracker = select_value("new-ticket-tracker");
             let priority = select_value("new-ticket-priority");
+            let category = select_value("new-ticket-category");
             let assignee = input_value("new-ticket-assignee");
             let start_date = input_value("new-ticket-start-date");
             let due_date = input_value("new-ticket-due-date");
@@ -390,8 +402,11 @@ fn wire_ticket_form() {
                 return;
             }
             let mut body_json = serde_json::json!({ "title": title, "description": description, "project_id": project_id, "tracker": tracker, "priority": priority });
-            // 担当者・開始日・期限日・進捗率はいずれも任意入力
+            // カテゴリ・担当者・開始日・期限日・進捗率はいずれも任意入力
             // (空欄なら送らない、サーバー側の`Option<...>`既定のまま)。
+            if !category.trim().is_empty() {
+                body_json["category"] = serde_json::Value::String(category);
+            }
             if !assignee.trim().is_empty() {
                 body_json["assignee"] = serde_json::Value::String(assignee);
             }
@@ -673,7 +688,33 @@ pub fn select_project(project_id: u32) {
     set_text("selected-project-label", &format!("Selected project ID (選択中のプロジェクトID): {project_id}"));
     show("ticket-detail", false);
     set_html("wiki-list", "");
-    wasm_bindgen_futures::spawn_local(async move { load_tickets(project_id).await });
+    wasm_bindgen_futures::spawn_local(async move {
+        load_project_categories(project_id).await;
+        load_tickets(project_id).await;
+    });
+}
+
+/// 選択中プロジェクトの`category_defs`を取得し、チケット作成フォームの
+/// カテゴリ選択肢を動的に再構築する(2026-07-31追加)。プロジェクトに
+/// カテゴリ定義が無い場合は「(none / なし)」のみの選択肢に戻す。
+async fn load_project_categories(project_id: u64) {
+    let empty_html = "<option value=\"\">(none / なし)</option>".to_string();
+    let Ok((200, text)) = api("GET", &format!("/api/projects/{project_id}"), None).await else {
+        set_html("new-ticket-category", &empty_html);
+        return;
+    };
+    let Ok(project) = serde_json::from_str::<serde_json::Value>(&text) else {
+        set_html("new-ticket-category", &empty_html);
+        return;
+    };
+    let categories = project.get("category_defs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut html = empty_html;
+    for c in &categories {
+        if let Some(name) = c.as_str() {
+            html.push_str(&format!(r#"<option value="{name}">{name}</option>"#, name = escape_html(name)));
+        }
+    }
+    set_html("new-ticket-category", &html);
 }
 
 async fn load_tickets(project_id: u64) {

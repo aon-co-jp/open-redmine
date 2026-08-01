@@ -185,6 +185,10 @@
           <h2>Projects (プロジェクト)</h2>
           <ul id="project-list"></ul>
           <input id="new-project-name" type="text" placeholder="New project name, admin only (新規プロジェクト名・管理者のみ作成可)" />
+          <label for="new-project-categories">Categories, comma-separated, optional (カテゴリ・カンマ区切り・任意)</label>
+          <input id="new-project-categories" type="text" placeholder="e.g. frontend,backend (例: frontend,backend)" />
+          <label for="new-project-custom-fields">Custom field names, comma-separated, optional (カスタムフィールド名・カンマ区切り・任意)</label>
+          <input id="new-project-custom-fields" type="text" placeholder="e.g. severity,customer (例: severity,customer)" />
           <button id="create-project-btn">Create project (プロジェクト作成)</button>
         </section>
 
@@ -227,6 +231,10 @@
             <option value="high">High (高め)</option>
             <option value="urgent">Urgent (急いで)</option>
             <option value="immediate">Immediate (即時)</option>
+          </select>
+          <label for="new-ticket-category">Category, optional (カテゴリ・任意)</label>
+          <select id="new-ticket-category">
+            <option value="">(none / なし)</option>
           </select>
           <label for="new-ticket-assignee">Assignee email, optional (担当者メールアドレス・任意)</label>
           <input id="new-ticket-assignee" type="text" placeholder="e.g. dev@example.com (例: dev@example.com)" />
