@@ -118,9 +118,14 @@ VPS上の作業パス: `/root/open-redmine`。
      `block`に戻ることを確認、(c)「省メモリ版に変更」→ページを実際に
      リロードしても`localStorage`の値に基づき状態(ステータス文言・
      GitHub連携セクションの表示)が正しく復元されることを確認。
-  - 次にすべきこと: (1) 本番へのデプロイ、(2) 他のGUIを持つリポジトリ
-    (`rs-link-fusion`等)への同パターン展開(`open-raid-z/CLAUDE.md`の
-    段階的着手方針の続き)。
+  - 次にすべきこと: 他のGUIを持つリポジトリ(`rs-link-fusion`等)への
+    同パターン展開(`open-raid-z/CLAUDE.md`の段階的着手方針の続き)。
+
+- **2026-08-01(続き4) 本番デプロイ完了**: `git pull`→`cargo build
+  --target wasm32-unknown-unknown --release`(web/、pkg自体は
+  リポジトリにコミット済みのため再生成不要)→
+  `systemctl restart open-redmine.service`。`curl
+  https://easy-web.tokyo/open-redmine/`→200を確認。
 
 - **2026-08-01(続き) GitHub Webhook受信によるリアルタイム更新(前々回
   エントリの「次にすべきこと(2)」対応)**: 新設`src/github_webhook.rs`。
