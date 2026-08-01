@@ -181,10 +181,12 @@
       </section>
 
       <section id="power-profile-section" class="hidden">
-        <h2>Feature &amp; memory mode (機能・メモリモード)</h2>
-        <p class="muted">Switch to a lighter mode on low-memory devices, or restore all features (低メモリ端末では軽量モードに切り替え、いつでも全機能に戻せます)。</p>
-        <button id="power-profile-memory-saver-btn">Switch to memory-saver mode (省メモリ版に変更)</button>
-        <button id="power-profile-minimal-btn">Switch to minimal + memory-saver mode (省機能+省メモリ版に変更)</button>
+        <h2>Feature &amp; power mode (機能・電源モード)</h2>
+        <p class="muted">Combine any of the checkboxes below, or use the buttons to switch to a minimal UI or restore everything (下のチェックボックスは自由に組み合わせ可能。ボタンで省機能表示への切替・全機能復元ができます)。</p>
+        <label><input type="checkbox" id="profile-power-save" /> Power-saving (省電力)</label>
+        <label><input type="checkbox" id="profile-memory-saver" /> Memory-saver (省メモリ)</label>
+        <label><input type="checkbox" id="profile-always-on" /> Always-on (常時電源接続)</label>
+        <button id="power-profile-minimal-btn">Switch to minimal UI (省機能表示に切替)</button>
         <button id="power-profile-restore-btn">Restore all features (全機能を復元)</button>
         <p id="power-profile-status" class="muted"></p>
       </section>

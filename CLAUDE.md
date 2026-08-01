@@ -82,6 +82,29 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-08-01(続き5) 電源プロファイルをボタン方式からチェックボックス
+  方式へ変更(ユーザー指示「省メモリ、省機能、全機能を復元ボタン、
+  省メモリ、常時電源接続などのチェックボックスとボタンにして」)**:
+  直前エントリ(続き3)の3ボタン設計(`memory_saver`/`minimal`/`normal`の
+  排他的な文字列1つ)を、`open-easy-web`の`PowerProfileFlags`と同じ
+  「省電力/省メモリ/常時電源接続を独立チェックボックスとして自由に
+  組み合わせ」方式へ作り直した(`open-gitea`の同日実装と揃える形)。
+  「省機能表示に切替」「全機能を復元」はボタンのまま。効果のロジックは
+  変わらず: 省電力または省メモリが有効(かつ常時電源接続で上書きされて
+  いない)ならGitHubコミット自動取得を止める。localStorageキーも
+  `rsred_feature_mode_v1`(単一文字列)から`rsred_profile_{power_save,
+  memory_saver,always_on}`+`rsred_minimal_ui_v1`(各`"0"`/`"1"`)の4キー
+  構成へ変更(後方互換は意図的に取っていない——新規キーのため既存
+  ユーザーの選択は単に既定〈通常〉へ戻るだけで実害は無いと判断)。
+  検証: `cargo build --target wasm32-unknown-unknown --release`警告0件、
+  `cargo test`(web/4件・メインクレート91件)全green。ローカルで実際に
+  ブラウザ操作(ログイン→チェックボックス2つ選択→ステータス文言が
+  「Active: Memory-saver + Always-on」に変化→「省機能表示に切替」→
+  github/gantt/wikiの3セクションが`display:none`に→「全機能を復元」→
+  全てのチェックが外れ`display:block`に戻ることを`getComputedStyle`で
+  確認、`open-gitea`と同じ検証手法)。
+  - 次にすべきこと: 本番へのデプロイ。
+
 - **2026-08-01(続き3) 「省機能+省メモリ版に切替」ボタンを追加
   (エコシステム標準方針、`open-raid-z/CLAUDE.md`「GUIを持つ全リポジトリに
   『省機能+省メモリ版に切替』ボタンを設置する」対応、`open-easy-web`の

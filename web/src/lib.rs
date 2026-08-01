@@ -304,54 +304,112 @@ fn refresh_auth_view() {
     }
 }
 
-/// 「省機能+省メモリ版」切替(2026-08-01追加、エコシステム標準方針
-/// `open-raid-z/CLAUDE.md`「GUIを持つ全リポジトリに『省機能+省メモリ版に
-/// 切替』ボタンを設置する」への対応、`open-easy-web`の先行実装パターンを
-/// 踏襲)。
+/// 電源/機能プロファイル(2026-08-01追加、エコシステム標準方針
+/// `open-raid-z/CLAUDE.md`「GUIを持つ全リポジトリに設置する」への対応)。
 ///
-/// このアプリにはバックグラウンドポーリングループが無い(チケット管理は
-/// 都度のリクエスト駆動)ため、`open-easy-web`のような電源プロファイル
-/// バックエンドAPIは意味を持たない——代わりに、実際に効果のある2点だけを
-/// 実装する: (1) 「省機能」は非必須セクション(GitHub連携・ガント
-/// チャート・Wiki)をDOMから隠しレンダリングコストを下げる、(2) 「省
-/// メモリ」はプロジェクト選択時のGitHubコミット自動取得を止め(手動の
-/// 「更新」ボタンのみで取得)、都度のAPI呼び出し・パース処理を減らす。
-/// ログイン・チケット管理そのものは両モードとも常に有効(必須機能)。
-const FEATURE_MODE_KEY: &str = "rsred_feature_mode_v1";
+/// `open-easy-web`の`PowerProfileFlags`(省電力/省メモリ/常時電源接続を
+/// **独立チェックボックス**として組み合わせ可能、「通常」は3つとも
+/// 未チェック)と同じ設計をチェックボックスUIとして実装(ユーザー指示、
+/// 2026-08-01: 「省メモリ、常時電源接続などのチェックボックスとボタンに
+/// して」)。「省機能表示に切替」「全機能を復元」は`open-gitea`と同じく
+/// ボタンのまま。
+///
+/// **正直な開示**: このアプリにはバックグラウンドポーリングループが
+/// 無い(チケット管理は都度のリクエスト駆動)ため、実際に効果があるのは
+/// 1軸のみ——省電力または省メモリのいずれかが有効ならプロジェクト選択時の
+/// GitHubコミット自動取得を止め(手動の「更新」ボタンのみで取得)、
+/// 常時電源接続が有効ならその抑制を上書きして常に自動取得する
+/// (`open-easy-web`の「常時電源接続がバッテリー節約軸を上書きする」
+/// という合成ルールと同じ考え方)。「省機能表示」は非必須セクション
+/// (GitHub連携・ガントチャート・Wiki)をDOMから隠す、独立した別軸。
+const PROFILE_POWER_SAVE_KEY: &str = "rsred_profile_power_save";
+const PROFILE_MEMORY_SAVER_KEY: &str = "rsred_profile_memory_saver";
+const PROFILE_ALWAYS_ON_KEY: &str = "rsred_profile_always_on";
+const MINIMAL_UI_KEY: &str = "rsred_minimal_ui_v1";
 const MINIMAL_HIDDEN_SECTION_IDS: [&str; 3] = ["github-section", "gantt-section", "wiki-section"];
 
-fn feature_mode() -> String {
-    local_storage().get_item(FEATURE_MODE_KEY).ok().flatten().unwrap_or_else(|| "normal".to_string())
+fn flag_get(key: &str) -> bool {
+    local_storage().get_item(key).ok().flatten().as_deref() == Some("1")
 }
 
+fn flag_set(key: &str, value: bool) {
+    let _ = local_storage().set_item(key, if value { "1" } else { "0" });
+}
+
+fn checkbox_checked(id: &str) -> bool {
+    by_id(id).dyn_into::<HtmlInputElement>().map(|el| el.checked()).unwrap_or(false)
+}
+
+fn set_checkbox_checked(id: &str, checked: bool) {
+    if let Ok(el) = by_id(id).dyn_into::<HtmlInputElement>() {
+        el.set_checked(checked);
+    }
+}
+
+/// 省電力または省メモリのいずれかが有効で、常時電源接続で上書きされて
+/// いない状態かどうか(=GitHubコミット自動取得を止めるべきかどうか)。
 fn is_memory_saver_mode() -> bool {
-    let mode = feature_mode();
-    mode == "memory_saver" || mode == "minimal"
+    let always_on = flag_get(PROFILE_ALWAYS_ON_KEY);
+    let power_save = flag_get(PROFILE_POWER_SAVE_KEY);
+    let memory_saver = flag_get(PROFILE_MEMORY_SAVER_KEY);
+    !always_on && (power_save || memory_saver)
+}
+
+fn feature_profile_labels() -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if flag_get(PROFILE_POWER_SAVE_KEY) {
+        labels.push("Power-saving (省電力)");
+    }
+    if flag_get(PROFILE_MEMORY_SAVER_KEY) {
+        labels.push("Memory-saver (省メモリ)");
+    }
+    if flag_get(PROFILE_ALWAYS_ON_KEY) {
+        labels.push("Always-on (常時電源接続)");
+    }
+    labels
 }
 
 fn apply_feature_mode() {
-    let mode = feature_mode();
-    let minimal = mode == "minimal";
+    let minimal = flag_get(MINIMAL_UI_KEY);
     for id in MINIMAL_HIDDEN_SECTION_IDS {
         show(id, !minimal);
     }
-    let label = match mode.as_str() {
-        "memory_saver" => "Memory-saver mode is active (省メモリ版が有効です)",
-        "minimal" => "Minimal + memory-saver mode is active (省機能+省メモリ版が有効です)",
-        _ => "Normal mode (通常モード)",
-    };
-    set_text("power-profile-status", label);
-}
+    set_checkbox_checked("profile-power-save", flag_get(PROFILE_POWER_SAVE_KEY));
+    set_checkbox_checked("profile-memory-saver", flag_get(PROFILE_MEMORY_SAVER_KEY));
+    set_checkbox_checked("profile-always-on", flag_get(PROFILE_ALWAYS_ON_KEY));
 
-fn set_feature_mode(mode: &str) {
-    let _ = local_storage().set_item(FEATURE_MODE_KEY, mode);
-    apply_feature_mode();
+    let mut labels = feature_profile_labels();
+    if minimal {
+        labels.push("Minimal UI (省機能表示)");
+    }
+    let text = if labels.is_empty() { "Normal mode (通常モード)".to_string() } else { format!("Active (有効): {}", labels.join(" + ")) };
+    set_text("power-profile-status", &text);
 }
 
 fn wire_feature_mode() {
-    add_click("power-profile-memory-saver-btn", || set_feature_mode("memory_saver"));
-    add_click("power-profile-minimal-btn", || set_feature_mode("minimal"));
-    add_click("power-profile-restore-btn", || set_feature_mode("normal"));
+    add_click("profile-power-save", || {
+        flag_set(PROFILE_POWER_SAVE_KEY, checkbox_checked("profile-power-save"));
+        apply_feature_mode();
+    });
+    add_click("profile-memory-saver", || {
+        flag_set(PROFILE_MEMORY_SAVER_KEY, checkbox_checked("profile-memory-saver"));
+        apply_feature_mode();
+    });
+    add_click("profile-always-on", || {
+        flag_set(PROFILE_ALWAYS_ON_KEY, checkbox_checked("profile-always-on"));
+        apply_feature_mode();
+    });
+    add_click("power-profile-minimal-btn", || {
+        flag_set(MINIMAL_UI_KEY, !flag_get(MINIMAL_UI_KEY));
+        apply_feature_mode();
+    });
+    add_click("power-profile-restore-btn", || {
+        flag_set(PROFILE_POWER_SAVE_KEY, false);
+        flag_set(PROFILE_MEMORY_SAVER_KEY, false);
+        flag_set(PROFILE_ALWAYS_ON_KEY, false);
+        flag_set(MINIMAL_UI_KEY, false);
+        apply_feature_mode();
+    });
     apply_feature_mode();
 }
 
