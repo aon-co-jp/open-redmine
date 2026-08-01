@@ -82,6 +82,52 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-07-31(続き6) GitHubリポジトリ連携機能を追加(ユーザー指示
+  「REDMINEの様にGithubとの連携機能を追加して」——Redmine本家のSCM
+  (リポジトリ)連携相当)**:
+  1. **バックエンド**: `Project.github_repo: Option<String>`
+     (`"owner/repo"`形式)を追加。新設`src/github.rs`:
+     `fetch_recent_commits(repo_spec, token)`がGitHub REST API
+     (`GET https://api.github.com/repos/{owner}/{repo}/commits`)を
+     呼び出し、直近コミット一覧(sha・メッセージ・著者・日時・URL)を
+     取得。`RSCHIKETTO_GITHUB_TOKEN`環境変数(任意)でAuthorization
+     ヘッダーを付与可能(未設定でも公開リポジトリなら未認証レート制限
+     内で動作)。コミットメッセージから`#123`形式のissue参照を抽出する
+     `parse_referenced_ticket_ids()`(正規表現crateへの新規依存を避けた
+     手動走査)、`owner/repo`形式のバリデーション`is_valid_repo_spec()`
+     (パストラバーサル・任意URL埋め込み防止)も実装。
+     `GET /api/projects/:id/github/commits`(`Need::View`権限が必要、
+     `github_repo`未設定は`404`、GitHub API呼び出し失敗は`502`)を追加。
+  2. **フロントエンド**: プロジェクト作成フォームに`github_repo`入力欄、
+     新設「GitHub commits (GitHubコミット連携)」セクションに直近
+     コミット一覧(sha・メッセージ・著者・GitHubへのリンク・参照
+     チケットIDバッジ)を表示。プロジェクト選択時に自動取得+
+     「Refresh (更新)」ボタンで再取得。
+  3. **正直な開示**: (1) 書き込み系連携(GitHub Webhook受信によるリアル
+     タイム更新、コミット↔チケットの永続的な紐付け保存)は対象外——
+     毎回GitHub APIを直接呼ぶ読み取り専用の一覧表示のみ。(2) issue参照
+     の抽出はコミットメッセージの表示側での簡易パースに留まり、参照
+     先チケットへの実際のリンク遷移・コメント自動追記等は行わない
+     (バッジ表示のみ)。(3) ブランチ選択・特定ファイルのdiff表示・
+     タグ/リリース一覧等、Redmine本家のリポジトリブラウザが持つ他の
+     機能は対象外。
+  4. **検証**: 新規テスト3件(`github::tests::
+     parses_single_and_multiple_ticket_references`・
+     `validates_owner_repo_spec`——パース・バリデーションロジックの
+     単体テスト、`handler_tests::
+     github_commits_endpoint_requires_login_and_a_configured_repo`——
+     未ログイン401・`github_repo`未設定404・存在しないプロジェクト404を
+     実HTTPリクエストで確認)、メインクレート`cargo test`**87→88件、
+     全green**。`web/`側`cargo test`4件全green(既存のまま)。
+     `cargo build --target wasm32-unknown-unknown --release`成功。
+     実バイナリを起動し、`github_repo: "aon-co-jp/open-redmine"`を
+     設定したプロジェクトで**実際にGitHub APIへ到達し、このリポジトリ
+     自身の実コミット一覧が正しく返ってくること**を`curl`で確認した
+     (実ネットワーク越しの正常系を実際に検証済み、モック無し)。
+  - 次にすべきこと: (1) 本番へのデプロイ+実クリックE2E、(2) 参照
+    チケットバッジのクリックでチケット詳細へジャンプする導線、
+    (3) Webhook受信によるリアルタイム更新(将来検討)。
+
 - **2026-07-31(続き5) プロジェクトのカテゴリ・カスタムフィールド定義を
   web側で作成可能に(直前エントリの「次にすべきこと(1) 管理画面」への
   部分対応、セッション再開)**:

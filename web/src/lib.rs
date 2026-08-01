@@ -370,11 +370,17 @@ fn wire_project_form() {
             }
             let categories = comma_list(&input_value("new-project-categories"));
             let custom_fields = comma_list(&input_value("new-project-custom-fields"));
-            let body = serde_json::json!({ "name": name, "category_defs": categories, "custom_field_defs": custom_fields }).to_string();
+            let github_repo = input_value("new-project-github-repo");
+            let mut body_json = serde_json::json!({ "name": name, "category_defs": categories, "custom_field_defs": custom_fields });
+            if !github_repo.trim().is_empty() {
+                body_json["github_repo"] = serde_json::Value::String(github_repo);
+            }
+            let body = body_json.to_string();
             if let Ok((201, _)) = api("POST", "/api/projects", Some(body)).await {
                 set_input_value("new-project-name", "");
                 set_input_value("new-project-categories", "");
                 set_input_value("new-project-custom-fields", "");
+                set_input_value("new-project-github-repo", "");
                 load_projects().await;
             }
         });
@@ -383,6 +389,7 @@ fn wire_project_form() {
 
 fn wire_ticket_form() {
     add_click("refresh-gantt-btn", on_refresh_gantt);
+    add_click("refresh-github-commits-btn", on_refresh_github_commits);
     add_click("create-ticket-btn", || {
         wasm_bindgen_futures::spawn_local(async {
             let Some(project_id) = current_project_id() else {
@@ -691,7 +698,59 @@ pub fn select_project(project_id: u32) {
     wasm_bindgen_futures::spawn_local(async move {
         load_project_categories(project_id).await;
         load_tickets(project_id).await;
+        load_github_commits(project_id).await;
     });
+}
+
+/// 選択中プロジェクトの`GET /api/projects/:id/github/commits`を呼び、
+/// 直近コミット一覧を`#github-commit-list`へ描画する(2026-07-31追加)。
+/// `github_repo`未設定(`404`)の場合はその旨を表示し、エラーにはしない
+/// (連携は任意設定のため)。
+async fn load_github_commits(project_id: u64) {
+    match api("GET", &format!("/api/projects/{project_id}/github/commits"), None).await {
+        Ok((200, text)) => {
+            let Ok(commits) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
+                set_html("github-commit-list", "<li>Failed to parse commits (コミット一覧の解析に失敗しました)</li>");
+                return;
+            };
+            if commits.is_empty() {
+                set_html("github-commit-list", "<li class=\"muted\">No commits (コミットがありません)</li>");
+                return;
+            }
+            let mut html = String::new();
+            for c in &commits {
+                let sha = c.get("sha").and_then(|v| v.as_str()).unwrap_or("").chars().take(7).collect::<String>();
+                let message = c.get("message").and_then(|v| v.as_str()).unwrap_or("").lines().next().unwrap_or("");
+                let author = c.get("author_name").and_then(|v| v.as_str()).unwrap_or("");
+                let url = c.get("html_url").and_then(|v| v.as_str()).unwrap_or("#");
+                let refs = c.get("referenced_ticket_ids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let mut ref_badges = String::new();
+                for r in &refs {
+                    if let Some(ticket_id) = r.as_u64() {
+                        ref_badges.push_str(&format!(r#" <span class="badge">#{ticket_id}</span>"#));
+                    }
+                }
+                html.push_str(&format!(
+                    r#"<li><a href="{url}" target="_blank" rel="noopener noreferrer">{sha}</a> {message} <span class="muted">({author})</span>{ref_badges}</li>"#,
+                    url = escape_html(url),
+                    sha = escape_html(&sha),
+                    message = escape_html(message),
+                    author = escape_html(author),
+                ));
+            }
+            set_html("github-commit-list", &html);
+        }
+        Ok((404, _)) => set_html("github-commit-list", "<li class=\"muted\">No GitHub repo linked to this project (このプロジェクトにGitHubリポジトリが連携されていません)</li>"),
+        Ok((status, msg)) => set_html("github-commit-list", &format!("<li>Error (エラー) ({status}): {}</li>", escape_html(&msg))),
+        Err(_) => set_html("github-commit-list", "<li>Network error occurred (通信エラーが発生しました)</li>"),
+    }
+}
+
+fn on_refresh_github_commits() {
+    let Some(project_id) = current_project_id() else {
+        return;
+    };
+    wasm_bindgen_futures::spawn_local(async move { load_github_commits(project_id).await });
 }
 
 /// 選択中プロジェクトの`category_defs`を取得し、チケット作成フォームの

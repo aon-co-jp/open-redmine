@@ -31,6 +31,12 @@ pub struct Project {
     /// (`custom_field_defs`と同じ検証パターンを踏襲)。
     #[serde(default)]
     pub category_defs: Vec<String>,
+    /// 連携するGitHubリポジトリ(`"owner/repo"`形式、Redmine本家のSCM
+    /// (リポジトリ)連携相当、2026-07-31追加)。`None`なら未連携。
+    /// GitHub側の認証情報(PAT)は`RSCHIKETTO_GITHUB_TOKEN`環境変数
+    /// (任意、未設定なら未認証の公開APIレート制限内で動作)。
+    #[serde(default)]
+    pub github_repo: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -124,6 +130,7 @@ mod tests {
             parent_id: None,
             custom_field_defs: Vec::new(),
             category_defs: Vec::new(),
+            github_repo: None,
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         });
@@ -148,6 +155,7 @@ mod tests {
             parent_id,
             custom_field_defs: Vec::new(),
             category_defs: Vec::new(),
+            github_repo: None,
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         };
