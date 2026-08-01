@@ -180,6 +180,15 @@
         <button id="logout-btn">Log out (ログアウト)</button>
       </section>
 
+      <section id="power-profile-section" class="hidden">
+        <h2>Feature &amp; memory mode (機能・メモリモード)</h2>
+        <p class="muted">Switch to a lighter mode on low-memory devices, or restore all features (低メモリ端末では軽量モードに切り替え、いつでも全機能に戻せます)。</p>
+        <button id="power-profile-memory-saver-btn">Switch to memory-saver mode (省メモリ版に変更)</button>
+        <button id="power-profile-minimal-btn">Switch to minimal + memory-saver mode (省機能+省メモリ版に変更)</button>
+        <button id="power-profile-restore-btn">Restore all features (全機能を復元)</button>
+        <p id="power-profile-status" class="muted"></p>
+      </section>
+
       <div id="app-main" class="hidden">
         <section>
           <h2>Projects (プロジェクト)</h2>
@@ -358,7 +367,7 @@
           <button id="close-ticket-detail-btn">Close (閉じる)</button>
         </section>
 
-        <section>
+        <section id="wiki-section">
           <h2>Wiki</h2>
           <button id="load-wiki-btn">Show wiki for selected project (選択中プロジェクトのWikiを表示)</button>
           <p id="wiki-status" class="muted"></p>

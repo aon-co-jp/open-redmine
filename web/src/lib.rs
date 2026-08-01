@@ -277,6 +277,7 @@ pub fn start() {
     wire_ticket_form();
     wire_ticket_detail();
     wire_wiki();
+    wire_feature_mode();
     refresh_auth_view();
     if session_token().is_some() {
         wasm_bindgen_futures::spawn_local(async { load_projects().await });
@@ -296,10 +297,62 @@ fn refresh_auth_view() {
     show("auth-logged-out", !logged_in);
     show("auth-logged-in", logged_in);
     show("app-main", logged_in);
+    show("power-profile-section", logged_in);
     if logged_in {
         let email = local_storage().get_item(EMAIL_KEY).ok().flatten().unwrap_or_default();
         set_text("logged-in-email", &email);
     }
+}
+
+/// 「省機能+省メモリ版」切替(2026-08-01追加、エコシステム標準方針
+/// `open-raid-z/CLAUDE.md`「GUIを持つ全リポジトリに『省機能+省メモリ版に
+/// 切替』ボタンを設置する」への対応、`open-easy-web`の先行実装パターンを
+/// 踏襲)。
+///
+/// このアプリにはバックグラウンドポーリングループが無い(チケット管理は
+/// 都度のリクエスト駆動)ため、`open-easy-web`のような電源プロファイル
+/// バックエンドAPIは意味を持たない——代わりに、実際に効果のある2点だけを
+/// 実装する: (1) 「省機能」は非必須セクション(GitHub連携・ガント
+/// チャート・Wiki)をDOMから隠しレンダリングコストを下げる、(2) 「省
+/// メモリ」はプロジェクト選択時のGitHubコミット自動取得を止め(手動の
+/// 「更新」ボタンのみで取得)、都度のAPI呼び出し・パース処理を減らす。
+/// ログイン・チケット管理そのものは両モードとも常に有効(必須機能)。
+const FEATURE_MODE_KEY: &str = "rsred_feature_mode_v1";
+const MINIMAL_HIDDEN_SECTION_IDS: [&str; 3] = ["github-section", "gantt-section", "wiki-section"];
+
+fn feature_mode() -> String {
+    local_storage().get_item(FEATURE_MODE_KEY).ok().flatten().unwrap_or_else(|| "normal".to_string())
+}
+
+fn is_memory_saver_mode() -> bool {
+    let mode = feature_mode();
+    mode == "memory_saver" || mode == "minimal"
+}
+
+fn apply_feature_mode() {
+    let mode = feature_mode();
+    let minimal = mode == "minimal";
+    for id in MINIMAL_HIDDEN_SECTION_IDS {
+        show(id, !minimal);
+    }
+    let label = match mode.as_str() {
+        "memory_saver" => "Memory-saver mode is active (省メモリ版が有効です)",
+        "minimal" => "Minimal + memory-saver mode is active (省機能+省メモリ版が有効です)",
+        _ => "Normal mode (通常モード)",
+    };
+    set_text("power-profile-status", label);
+}
+
+fn set_feature_mode(mode: &str) {
+    let _ = local_storage().set_item(FEATURE_MODE_KEY, mode);
+    apply_feature_mode();
+}
+
+fn wire_feature_mode() {
+    add_click("power-profile-memory-saver-btn", || set_feature_mode("memory_saver"));
+    add_click("power-profile-minimal-btn", || set_feature_mode("minimal"));
+    add_click("power-profile-restore-btn", || set_feature_mode("normal"));
+    apply_feature_mode();
 }
 
 fn add_click(id: &str, f: impl FnMut() + 'static) {
@@ -698,7 +751,12 @@ pub fn select_project(project_id: u32) {
     wasm_bindgen_futures::spawn_local(async move {
         load_project_categories(project_id).await;
         load_tickets(project_id).await;
-        load_github_commits(project_id).await;
+        // 省メモリ/省機能モードでは自動取得を止め、手動の「更新」ボタン
+        // 経由でのみ取得する(都度のAPI呼び出し・パース処理を減らす、
+        // wire_feature_mode参照)。
+        if !is_memory_saver_mode() {
+            load_github_commits(project_id).await;
+        }
     });
 }
 
