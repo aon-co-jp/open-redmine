@@ -82,6 +82,42 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-08-01(続き7) Android版アプリシェルを新規実装(ユーザー指示
+  「Android対応・複数ドメインバイナリ共有等の残りの横断バックログを
+  行ないます」、`open-raid-z/CLAUDE.md`のAndroid最優先方針・段階的着手
+  方針「1. 既にNDKクロスコンパイル実証済みのリポジトリを優先」に該当)**:
+  2026-07-23時点で`cargo ndk`によるクロスビルド自体は実証済みだったが
+  (同日HANDOFF参照)、実際のAndroidアプリシェル(`android/`ディレクトリ)は
+  まだ存在していなかった。`aruaru-db/android`・`open-web-server/android`
+  (先行実装)と同じGradle構成・Kotlinパターンをそのまま踏襲して新設。
+  1. **位置づけ**: open-redmine本体(Rust製チケット管理サーバー+WASM
+     ブラウザGUI)をAndroid上で実行するものではなく、リモートの
+     open-redmineインスタンスへ`GET /healthz`(平文`"ok"`、JSON構造を
+     持たないため`aruaru-db`版のようなJSONパースは不要・対象外)で
+     疎通確認し、実際のチケット操作は「🌐ブラウザで開く」ボタンで
+     外部ブラウザ(既存のWASM GUI、電源/機能プロファイルのチェック
+     ボックスUIも含め完成済み)に委ねる設計(open-easy-web/android版と
+     同じ「ネイティブUIを再実装しない」判断)。
+  2. **3電源プロファイル**(`PowerProfile.kt`、既存実装と全く同じenum
+     構成・ラベル): 省電力(疎通確認間隔5分・WakeLockなし)・通常(1分)・
+     常時電源接続(5秒・`PARTIAL_WAKE_LOCK`保持)。電源抜き差し時の
+     確認ダイアログ導線(`ACTION_POWER_DISCONNECTED`/`CONNECTED`)も
+     既存実装と同一。`activity-alias`×3でプロファイル別ホーム画面
+     アイコンにも対応。
+  3. **検証(実測)**: `gradle-8.11.1`(キャッシュ済み配布物を直接実行)で
+     `:app:assembleDebug`→**`BUILD SUCCESSFUL`**、
+     `android/app/build/outputs/apk/debug/app-debug.apk`(約3.24MB)が
+     実際に生成されることを確認済み。
+  4. **正直な開示・未検証事項**(既存の他リポジトリAndroid版と同じ
+     パターンの制約): (a) 実機/エミュレータでの起動・`/healthz`への
+     実際の疎通確認は今回未実施(ビルド成功の確認までに留まる)、
+     (b) チケット一覧・作成等のネイティブUIは意図的にスコープ外
+     (「ブラウザで開く」ボタンに委ねる設計のため)。
+  - 次にすべきこと: (1) 実機/エミュレータでの`adb install`→起動→
+    `/healthz`実疎通確認・「ブラウザで開く」ボタンの実際の遷移確認、
+    (2) 他のGUIシェルを持つリポジトリ(`rs-link-fusion`等)への同様の
+    Android対応展開。
+
 - **2026-08-01(続き5) 電源プロファイルをボタン方式からチェックボックス
   方式へ変更(ユーザー指示「省メモリ、省機能、全機能を復元ボタン、
   省メモリ、常時電源接続などのチェックボックスとボタンにして」)**:
