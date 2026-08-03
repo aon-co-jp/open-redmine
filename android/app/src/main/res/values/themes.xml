@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.OpenRedmine" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>
