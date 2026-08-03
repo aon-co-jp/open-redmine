@@ -150,9 +150,13 @@ struct CreateProjectRequest {
     /// (2026-07-31追加)。
     #[serde(default)]
     category_defs: Vec<String>,
-    /// 連携するGitHubリポジトリ(`"owner/repo"`形式、2026-07-31追加)。
+    /// 連携するリポジトリ(`"owner/repo"`形式、2026-07-31追加)。
     #[serde(default)]
     github_repo: Option<String>,
+    /// `github_repo`のSCMプロバイダ(`"github"`〈既定〉/`"gitlab"`/
+    /// `"bitbucket"`、2026-08-01追加)。
+    #[serde(default)]
+    scm_provider: Option<String>,
 }
 
 /// `POST /api/projects` — プロジェクトを新規作成する(管理者のみ、
@@ -183,6 +187,7 @@ async fn create_project(req: &Request, state: Data<&AppState>, body: poem::web::
         custom_field_defs: body.custom_field_defs.clone(),
         category_defs: body.category_defs.clone(),
         github_repo: body.github_repo.clone(),
+        scm_provider: body.scm_provider.clone(),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -239,6 +244,10 @@ struct UpdateProjectRequest {
     /// 同じ二重`Option`パターン、2026-07-31追加)。
     #[serde(default, deserialize_with = "deserialize_double_option_string")]
     github_repo: Option<Option<String>>,
+    /// SCMプロバイダの置き換え(`"github"`/`"gitlab"`/`"bitbucket"`、
+    /// フィールド省略は変更なし、2026-08-01追加)。
+    #[serde(default)]
+    scm_provider: Option<String>,
 }
 
 fn deserialize_double_option_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
@@ -299,6 +308,9 @@ async fn update_project(
     }
     if let Some(new_repo) = body.github_repo.clone() {
         proj.github_repo = new_repo;
+    }
+    if let Some(provider) = body.scm_provider.clone() {
+        proj.scm_provider = Some(provider);
     }
     if let Some(defs) = &body.category_defs {
         proj.category_defs = defs.clone();
@@ -1846,17 +1858,18 @@ async fn run_saved_query(req: &Request, PathExtractor(id): PathExtractor<u64>, s
     Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&visible).unwrap_or_default()))
 }
 
-/// `GET /api/projects/:id/github/commits` — 連携中のGitHubリポジトリの
-/// 直近コミット一覧を取得する(Redmine本家のSCM連携相当、2026-07-31
-/// 追加)。プロジェクトへの`Need::View`権限が必要(既存のチケット閲覧と
+/// `GET /api/projects/:id/github/commits` — 連携中のリポジトリの
+/// 直近コミット一覧を取得する(Redmine本家のSCM連携相当、2026-07-31に
+/// GitHub専用として追加、2026-08-01にGitLab/Bitbucketへ拡張)。
+/// プロジェクトへの`Need::View`権限が必要(既存のチケット閲覧と
 /// 同じアクセス制御を再利用)。プロジェクトに`github_repo`が未設定なら
-/// `404`、GitHub API呼び出しに失敗した場合は`502`で理由を返す。
+/// `404`、プロバイダAPI呼び出しに失敗した場合は`502`で理由を返す。
 ///
-/// 2026-08-01追記: Webhook経由でこのリポジトリ宛のキャッシュ
-/// (`github_webhook.rs`)が存在すればそちらを優先して返す——push直後の
-/// 反映が即時になり、GitHub APIへの都度問い合わせ(レート制限あり)も
-/// 避けられる。キャッシュが無い(Webhook未設定)プロジェクトは従来通り
-/// 都度GitHub APIへ問い合わせる、完全に後方互換。
+/// 2026-08-01追記: Webhook経由のキャッシュ(`github_webhook.rs`、
+/// GitHubの`push`イベントのみ対応)は`scm_provider`がGitHub
+/// (既定・未設定含む)の場合のみ参照する——GitLab/Bitbucketの
+/// プロジェクトにはこのキャッシュを流用しない(そもそも書き込まれない
+/// ため実害は無いが、意図を明示する)。
 #[handler]
 async fn list_github_commits(req: &Request, PathExtractor(id): PathExtractor<u64>, state: Data<&AppState>) -> PoemResult<Response> {
     let projects = project::load(&state.data_root, state.backend.as_ref()).await;
@@ -1867,16 +1880,26 @@ async fn list_github_commits(req: &Request, PathExtractor(id): PathExtractor<u64
     let Some(repo_spec) = &project.github_repo else {
         return Ok(Response::builder().status(poem::http::StatusCode::NOT_FOUND).body("this project has no github_repo configured"));
     };
-    let cache = github_webhook::load(&state.data_root, state.backend.as_ref()).await;
-    if let Some(cached) = cache.by_repo.get(repo_spec) {
-        if !cached.is_empty() {
-            return Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(cached).unwrap_or_default()));
+    let provider = github::ScmProvider::parse(project.scm_provider.as_deref());
+
+    if provider == github::ScmProvider::GitHub {
+        let cache = github_webhook::load(&state.data_root, state.backend.as_ref()).await;
+        if let Some(cached) = cache.by_repo.get(repo_spec) {
+            if !cached.is_empty() {
+                return Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(cached).unwrap_or_default()));
+            }
         }
     }
-    let token = std::env::var("RSCHIKETTO_GITHUB_TOKEN").ok();
-    match github::fetch_recent_commits(repo_spec, token.as_deref()).await {
+
+    let token_env = match provider {
+        github::ScmProvider::GitHub => "RSCHIKETTO_GITHUB_TOKEN",
+        github::ScmProvider::GitLab => "RSCHIKETTO_GITLAB_TOKEN",
+        github::ScmProvider::Bitbucket => "RSCHIKETTO_BITBUCKET_TOKEN",
+    };
+    let token = std::env::var(token_env).ok();
+    match github::fetch_recent_commits_for(provider, repo_spec, token.as_deref()).await {
         Ok(commits) => Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&commits).unwrap_or_default())),
-        Err(e) => Ok(Response::builder().status(poem::http::StatusCode::BAD_GATEWAY).body(format!("github fetch failed: {e}"))),
+        Err(e) => Ok(Response::builder().status(poem::http::StatusCode::BAD_GATEWAY).body(format!("scm fetch failed: {e}"))),
     }
 }
 

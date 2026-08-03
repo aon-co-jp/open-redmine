@@ -200,7 +200,13 @@
           <input id="new-project-categories" type="text" placeholder="e.g. frontend,backend (例: frontend,backend)" />
           <label for="new-project-custom-fields">Custom field names, comma-separated, optional (カスタムフィールド名・カンマ区切り・任意)</label>
           <input id="new-project-custom-fields" type="text" placeholder="e.g. severity,customer (例: severity,customer)" />
-          <label for="new-project-github-repo">GitHub repo, optional (GitHubリポジトリ・任意)</label>
+          <label for="new-project-scm-provider">SCM provider, optional (SCMプロバイダ・任意)</label>
+          <select id="new-project-scm-provider">
+            <option value="github">GitHub</option>
+            <option value="gitlab">GitLab</option>
+            <option value="bitbucket">Bitbucket</option>
+          </select>
+          <label for="new-project-github-repo">Repo (owner/repo), optional (リポジトリ・任意)</label>
           <input id="new-project-github-repo" type="text" placeholder="owner/repo, e.g. aon-co-jp/open-redmine (例: aon-co-jp/open-redmine)" />
           <button id="create-project-btn">Create project (プロジェクト作成)</button>
         </section>

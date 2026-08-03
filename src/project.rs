@@ -31,12 +31,22 @@ pub struct Project {
     /// (`custom_field_defs`と同じ検証パターンを踏襲)。
     #[serde(default)]
     pub category_defs: Vec<String>,
-    /// 連携するGitHubリポジトリ(`"owner/repo"`形式、Redmine本家のSCM
+    /// 連携するリポジトリ(`"owner/repo"`形式、Redmine本家のSCM
     /// (リポジトリ)連携相当、2026-07-31追加)。`None`なら未連携。
+    /// フィールド名は歴史的経緯(当初GitHub専用だった)でそのまま
+    /// 残しているが、2026-08-01以降は`scm_provider`と組み合わせて
+    /// GitHub以外(GitLab/Bitbucket)のリポジトリ指定にも使う。
     /// GitHub側の認証情報(PAT)は`RSCHIKETTO_GITHUB_TOKEN`環境変数
     /// (任意、未設定なら未認証の公開APIレート制限内で動作)。
     #[serde(default)]
     pub github_repo: Option<String>,
+    /// `github_repo`をどのSCMプロバイダとして解釈するか
+    /// (`"github"`/`"gitlab"`/`"bitbucket"`、2026-08-01追加)。
+    /// `None`または未知の値は`"github"`として扱う(既存プロジェクトとの
+    /// 後方互換——このフィールド自体が存在しなかった時代のデータは
+    /// 全てGitHubリポジトリだったため)。
+    #[serde(default)]
+    pub scm_provider: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -131,6 +141,7 @@ mod tests {
             custom_field_defs: Vec::new(),
             category_defs: Vec::new(),
             github_repo: None,
+            scm_provider: None,
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         });
@@ -156,6 +167,7 @@ mod tests {
             custom_field_defs: Vec::new(),
             category_defs: Vec::new(),
             github_repo: None,
+            scm_provider: None,
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         };

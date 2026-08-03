@@ -1,8 +1,24 @@
-//! GitHubリポジトリ連携(Redmine本家のSCM/リポジトリ連携相当、
-//! 2026-07-31追加)。プロジェクトに紐付けた`"owner/repo"`から、GitHub
+//! SCM(ソースコード管理)リポジトリ連携(Redmine本家の同機能相当、
+//! 2026-07-31にGitHub専用として追加、2026-08-01にGitLab/Bitbucketへ
+//! 拡張)。プロジェクトに紐付けた`"owner/repo"`から、各プロバイダの
 //! REST APIで直近のコミット一覧を取得する。書き込み系の連携(Webhook
-//! 受信、issueへのコミット自動リンク永続化等)は対象外——読み取り専用の
-//! 一覧表示のみの最小実装(正直な開示)。
+//! 受信〈GitHubのみ実装済み、`github_webhook.rs`参照〉を除く、issueへの
+//! コミット自動リンク永続化等)は対象外——読み取り専用の一覧表示のみの
+//! 最小実装(正直な開示)。
+//!
+//! **対応プロバイダ(2026-08-01時点)**: GitHub(実機検証済み、Webhook
+//! 対応込み)・GitLab(gitlab.com、実際の公開API`GET /api/v4/projects/
+//! :id/repository/commits`で実機検証済み)・Bitbucket(bitbucket.org
+//! Cloud、実際の公開API`GET /2.0/repositories/:workspace/:repo/commits`
+//! で実機検証済み)。**未対応(正直な開示)**: GitBucket(Scala製OSS、
+//! GitHub API v3互換を謳っているため理論上`fetch_recent_commits`
+//! (GitHub用)がそのまま使える可能性が高いが、実サーバーが無く未検証)、
+//! Gitea(OSS版、GitHub API寄りだが専用のcommits一覧APIパスが異なる)、
+//! 本エコシステム自製の`open-gitea`(`/api/repos`のみでcommits一覧API
+//! 自体が存在しないため対象外)。セルフホストGitLab/Bitbucket Server
+//! (Data Center)はAPIベースURLが`gitlab.com`/`api.bitbucket.org`固定
+//! ではなくインスタンスごとに異なるため、今回はSaaS版(gitlab.com/
+//! bitbucket.org)のみ対応し、セルフホスト版のベースURL指定は未対応。
 
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +125,160 @@ pub async fn fetch_recent_commits(repo_spec: &str, token: Option<&str>) -> anyho
         .collect())
 }
 
+/// `Project.scm_provider`の値をパースする。`None`・未知の値は
+/// `GitHub`(既定、後方互換)として扱う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScmProvider {
+    GitHub,
+    GitLab,
+    Bitbucket,
+}
+
+impl ScmProvider {
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(str::to_ascii_lowercase).as_deref() {
+            Some("gitlab") => ScmProvider::GitLab,
+            Some("bitbucket") => ScmProvider::Bitbucket,
+            _ => ScmProvider::GitHub,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabCommitEntry {
+    id: String,
+    title: String,
+    author_name: String,
+    committed_date: String,
+    web_url: String,
+}
+
+/// gitlab.comの公開REST APIから直近のコミット一覧を取得する
+/// (実機検証済み: `GET https://gitlab.com/api/v4/projects/
+/// gitlab-org%2Fgitlab-test/repository/commits`)。`token`が`Some`なら
+/// `PRIVATE-TOKEN`ヘッダーを付与する(GitLab REST APIの標準的な個人
+/// アクセストークン方式)。
+pub async fn fetch_recent_commits_gitlab(repo_spec: &str, token: Option<&str>) -> anyhow::Result<Vec<GithubCommit>> {
+    if !is_valid_repo_spec(repo_spec) {
+        anyhow::bail!("invalid repo spec, expected \"namespace/repo\"");
+    }
+    let project_id = urlencode_path_segment(repo_spec);
+    let url = format!("https://gitlab.com/api/v4/projects/{project_id}/repository/commits");
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url).header("User-Agent", "open-redmine");
+    if let Some(t) = token {
+        req = req.header("PRIVATE-TOKEN", t);
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("GitLab API returned {}", resp.status());
+    }
+    let entries: Vec<GitLabCommitEntry> = resp.json().await?;
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let referenced_ticket_ids = parse_referenced_ticket_ids(&e.title);
+            GithubCommit { sha: e.id, author_name: e.author_name, date: e.committed_date, html_url: e.web_url, message: e.title, referenced_ticket_ids }
+        })
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketAuthorUser {
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketAuthor {
+    raw: Option<String>,
+    user: Option<BitbucketAuthorUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketLink {
+    href: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketLinks {
+    html: Option<BitbucketLink>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketCommitEntry {
+    hash: String,
+    message: String,
+    date: String,
+    author: Option<BitbucketAuthor>,
+    links: BitbucketLinks,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketCommitsResponse {
+    values: Vec<BitbucketCommitEntry>,
+}
+
+/// bitbucket.org Cloudの公開REST APIから直近のコミット一覧を取得する
+/// (実機検証済み: `GET https://api.bitbucket.org/2.0/repositories/
+/// atlassian/aui/commits`)。`token`が`Some`ならOAuthアクセストークンとして
+/// `Authorization: Bearer`を付与する。**正直な開示**: Bitbucketの
+/// 「アプリパスワード」(Basic認証)方式は今回未対応——OAuth2アクセス
+/// トークンのみをサポートする。
+pub async fn fetch_recent_commits_bitbucket(repo_spec: &str, token: Option<&str>) -> anyhow::Result<Vec<GithubCommit>> {
+    if !is_valid_repo_spec(repo_spec) {
+        anyhow::bail!("invalid repo spec, expected \"workspace/repo\"");
+    }
+    let url = format!("https://api.bitbucket.org/2.0/repositories/{repo_spec}/commits");
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url).header("User-Agent", "open-redmine");
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Bitbucket API returned {}", resp.status());
+    }
+    let body: BitbucketCommitsResponse = resp.json().await?;
+    Ok(body
+        .values
+        .into_iter()
+        .map(|e| {
+            let referenced_ticket_ids = parse_referenced_ticket_ids(&e.message);
+            let author_name = e
+                .author
+                .as_ref()
+                .and_then(|a| a.user.as_ref().and_then(|u| u.display_name.clone()).or_else(|| a.raw.clone()))
+                .unwrap_or_else(|| "unknown".to_string());
+            GithubCommit {
+                sha: e.hash,
+                author_name,
+                date: e.date,
+                html_url: e.links.html.map(|l| l.href).unwrap_or_default(),
+                message: e.message,
+                referenced_ticket_ids,
+            }
+        })
+        .collect())
+}
+
+/// `is_valid_repo_spec`で既に安全な文字集合(英数字・`-`・`_`・`.`・`/`)に
+/// 限定済みのため、パーセントエンコードが必要なのは`/`(GitLabの
+/// プロジェクトIDはパス区切りではなくURLエンコードした`namespace%2Frepo`
+/// を要求する)のみ。新規crate依存(`urlencoding`等)を避けた最小実装。
+fn urlencode_path_segment(spec: &str) -> String {
+    spec.replace('/', "%2F")
+}
+
+/// `scm_provider`に応じたプロバイダへディスパッチする(2026-08-01追加)。
+/// `list_github_commits`ハンドラ〈`main.rs`〉が呼ぶ唯一の入口。
+pub async fn fetch_recent_commits_for(provider: ScmProvider, repo_spec: &str, token: Option<&str>) -> anyhow::Result<Vec<GithubCommit>> {
+    match provider {
+        ScmProvider::GitHub => fetch_recent_commits(repo_spec, token).await,
+        ScmProvider::GitLab => fetch_recent_commits_gitlab(repo_spec, token).await,
+        ScmProvider::Bitbucket => fetch_recent_commits_bitbucket(repo_spec, token).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +302,37 @@ mod tests {
         assert!(!is_valid_repo_spec("/repo"));
         assert!(!is_valid_repo_spec("owner/repo?evil=1"));
         assert!(!is_valid_repo_spec("../../etc/passwd"));
+    }
+
+    #[test]
+    fn scm_provider_parses_known_values_and_defaults_to_github() {
+        assert_eq!(ScmProvider::parse(Some("gitlab")), ScmProvider::GitLab);
+        assert_eq!(ScmProvider::parse(Some("GitLab")), ScmProvider::GitLab);
+        assert_eq!(ScmProvider::parse(Some("bitbucket")), ScmProvider::Bitbucket);
+        assert_eq!(ScmProvider::parse(Some("github")), ScmProvider::GitHub);
+        assert_eq!(ScmProvider::parse(Some("unknown-provider")), ScmProvider::GitHub);
+        assert_eq!(ScmProvider::parse(None), ScmProvider::GitHub);
+    }
+
+    #[test]
+    fn urlencode_path_segment_escapes_only_the_slash() {
+        assert_eq!(urlencode_path_segment("aon-co-jp/open-redmine"), "aon-co-jp%2Fopen-redmine");
+    }
+
+    /// 実機検証(2026-08-01、モックではなく実際のgitlab.com/bitbucket.org
+    /// APIへの実HTTPリクエスト): CI/オフライン環境では失敗しうるため
+    /// `#[ignore]`とし、明示的に`cargo test -- --ignored`で実行する。
+    #[tokio::test]
+    #[ignore = "hits the real gitlab.com and bitbucket.org APIs"]
+    async fn fetch_recent_commits_gitlab_reaches_a_real_public_project() {
+        let commits = fetch_recent_commits_gitlab("gitlab-org/gitlab-test", None).await.unwrap();
+        assert!(!commits.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the real gitlab.com and bitbucket.org APIs"]
+    async fn fetch_recent_commits_bitbucket_reaches_a_real_public_repo() {
+        let commits = fetch_recent_commits_bitbucket("atlassian/aui", None).await.unwrap();
+        assert!(!commits.is_empty());
     }
 }
