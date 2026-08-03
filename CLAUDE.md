@@ -82,6 +82,55 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-08-03 GitLab/Bitbucket連携を追加(ユーザー指示「open-redmine の
+  Github、Gitbucket、Bitbucket、Gitlab、Giteaなどの連携対応」への対応、
+  横断バックログ4項目中の最後の1件)**:
+  1. **設計**: `Project.github_repo`(既存フィールド、フィールド名は
+     歴史的経緯でそのまま維持)をどのSCMとして解釈するかを選ぶ
+     `Project.scm_provider: Option<String>`(`"github"`/`"gitlab"`/
+     `"bitbucket"`、未指定・不明値は`"github"`として扱う——既存
+     プロジェクトとの後方互換)を追加。`src/github.rs`に`ScmProvider`
+     enum、`fetch_recent_commits_gitlab`(GitLab REST API v4、
+     `PRIVATE-TOKEN`ヘッダー、プロジェクトパスの`/`を`%2F`エンコード)・
+     `fetch_recent_commits_bitbucket`(Bitbucket Cloud API v2、`values[]`
+     配下にネスト、`Authorization: Bearer`——app-password/Basic認証は
+     非対応)・ディスパッチャ`fetch_recent_commits_for`を新設。
+     `list_github_commits`ハンドラは、GitHub以外のプロバイダでは既存の
+     Webhookキャッシュ確認をスキップする(キャッシュはGitHub専用の
+     仕組みのため)。トークンは`RSCHIKETTO_GITLAB_TOKEN`/
+     `RSCHIKETTO_BITBUCKET_TOKEN`環境変数(いずれも任意)。
+  2. **フロントエンド**: プロジェクト作成フォームにSCMプロバイダ
+     `<select>`(GitHub/GitLab/Bitbucket)を追加。
+  3. **正直な開示・未対応範囲**: GitBucket・実Gitea(OSS)は今回も
+     未実装のまま——この環境に実行中のGitBucket/Giteaサーバーが無く、
+     `open-gitea`(このエコシステム自身のフォージ)にはコミット一覧API
+     自体が存在しない(`/api/repos`・README・wiki・releasesのみ)ため、
+     実ネットワーク検証ができる対象が無いことが理由。5プロバイダ中
+     GitHub/GitLab/Bitbucketの3件が実装・実検証済み。
+  4. **検証(実測)**: メインクレート`cargo test`**93件全green**
+     (新規2件のユニットテスト`scm_provider_parses_known_values_and_
+     defaults_to_github`・`urlencode_path_segment_escapes_only_the_slash`
+     +既存91件、うち2件は`#[ignore]`付きの実ネットワークテストで
+     `cargo test github:: -- --ignored --nocapture`で明示実行し
+     両方ともpass〈GitLab: `gitlab-org/gitlab-test`、Bitbucket:
+     `atlassian/aui`、いずれも実際に本物のGitLab/Bitbucket APIへ到達し
+     正しくコミット一覧をパースできることを確認〉)。`web/`側
+     `cargo test`4件全green(回帰なし、UIはJS↔WASM間の単純な値受け渡し
+     のみのため専用テストは追加せず)。**実ブラウザでの実クリックE2E**:
+     `BASE_PATH`を一時的に空文字にしてローカルの`/`マウントで検証
+     (既存の確立済み手法)、ログイン→「GitLab Test」プロジェクト
+     (`gitlab-org/gitlab-test`、provider=gitlab)を作成→選択→
+     「GitHub commits」セクションに実際のGitLabコミット20件
+     (メッセージ・著者・SHA・`gitlab.com/.../-/commit/...`への
+     リンク付き)が正しくレンダリングされることを`read_page`で確認。
+     Bitbucketは`curl`によるAPI往復確認のみ(実クリックE2Eは未実施)。
+     検証後`BASE_PATH`は`/open-redmine`へ確実に復元しコミット差分に
+     残らないことを確認済み。
+  - 次にすべきこと: (1) BitbucketプロジェクトのブラウザクリックE2E
+    (現状curl確認のみ)、(2) GitBucket/Gitea連携(実行中のテストサーバー
+    が用意でき次第)、(3) 本番(`easy-web.tokyo/open-redmine`)への
+    デプロイ。
+
 - **2026-08-01(続き7) Android版アプリシェルを新規実装(ユーザー指示
   「Android対応・複数ドメインバイナリ共有等の残りの横断バックログを
   行ないます」、`open-raid-z/CLAUDE.md`のAndroid最優先方針・段階的着手
