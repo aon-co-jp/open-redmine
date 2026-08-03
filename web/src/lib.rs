@@ -485,6 +485,7 @@ fn wire_project_form() {
             let mut body_json = serde_json::json!({ "name": name, "category_defs": categories, "custom_field_defs": custom_fields });
             if !github_repo.trim().is_empty() {
                 body_json["github_repo"] = serde_json::Value::String(github_repo);
+                body_json["scm_provider"] = serde_json::Value::String(select_value("new-project-scm-provider"));
             }
             let body = body_json.to_string();
             if let Ok((201, _)) = api("POST", "/api/projects", Some(body)).await {
