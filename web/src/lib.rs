@@ -482,10 +482,14 @@ fn wire_project_form() {
             let categories = comma_list(&input_value("new-project-categories"));
             let custom_fields = comma_list(&input_value("new-project-custom-fields"));
             let github_repo = input_value("new-project-github-repo");
+            let scm_base_url = input_value("new-project-scm-base-url");
             let mut body_json = serde_json::json!({ "name": name, "category_defs": categories, "custom_field_defs": custom_fields });
             if !github_repo.trim().is_empty() {
                 body_json["github_repo"] = serde_json::Value::String(github_repo);
                 body_json["scm_provider"] = serde_json::Value::String(select_value("new-project-scm-provider"));
+                if !scm_base_url.trim().is_empty() {
+                    body_json["scm_base_url"] = serde_json::Value::String(scm_base_url);
+                }
             }
             let body = body_json.to_string();
             if let Ok((201, _)) = api("POST", "/api/projects", Some(body)).await {
@@ -493,6 +497,7 @@ fn wire_project_form() {
                 set_input_value("new-project-categories", "");
                 set_input_value("new-project-custom-fields", "");
                 set_input_value("new-project-github-repo", "");
+                set_input_value("new-project-scm-base-url", "");
                 load_projects().await;
             }
         });

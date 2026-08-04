@@ -205,9 +205,13 @@
             <option value="github">GitHub</option>
             <option value="gitlab">GitLab</option>
             <option value="bitbucket">Bitbucket</option>
+            <option value="gitea">Gitea (self-hosted, セルフホスト)</option>
+            <option value="gitbucket">GitBucket (self-hosted, セルフホスト)</option>
           </select>
           <label for="new-project-github-repo">Repo (owner/repo), optional (リポジトリ・任意)</label>
           <input id="new-project-github-repo" type="text" placeholder="owner/repo, e.g. aon-co-jp/open-redmine (例: aon-co-jp/open-redmine)" />
+          <label for="new-project-scm-base-url">Instance URL, required for Gitea/GitBucket only (インスタンスURL・Gitea/GitBucketのみ必須)</label>
+          <input id="new-project-scm-base-url" type="text" placeholder="e.g. https://gitea.example.com (例: https://gitea.example.com)" />
           <button id="create-project-btn">Create project (プロジェクト作成)</button>
         </section>
 

@@ -157,6 +157,10 @@ struct CreateProjectRequest {
     /// `"bitbucket"`、2026-08-01追加)。
     #[serde(default)]
     scm_provider: Option<String>,
+    /// `scm_provider`が`"gitea"`/`"gitbucket"`の場合に必須のセルフホスト
+    /// インスタンスURL(2026-08-04追加)。
+    #[serde(default)]
+    scm_base_url: Option<String>,
 }
 
 /// `POST /api/projects` — プロジェクトを新規作成する(管理者のみ、
@@ -188,6 +192,7 @@ async fn create_project(req: &Request, state: Data<&AppState>, body: poem::web::
         category_defs: body.category_defs.clone(),
         github_repo: body.github_repo.clone(),
         scm_provider: body.scm_provider.clone(),
+        scm_base_url: body.scm_base_url.clone(),
         created_at: now.clone(),
         updated_at: now,
     };
@@ -248,6 +253,10 @@ struct UpdateProjectRequest {
     /// フィールド省略は変更なし、2026-08-01追加)。
     #[serde(default)]
     scm_provider: Option<String>,
+    /// セルフホストインスタンスURLの置き換え(`Some(Some(v))`で設定、
+    /// `Some(None)`で解除、フィールド省略は変更なし、2026-08-04追加)。
+    #[serde(default, deserialize_with = "deserialize_double_option_string")]
+    scm_base_url: Option<Option<String>>,
 }
 
 fn deserialize_double_option_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
@@ -311,6 +320,9 @@ async fn update_project(
     }
     if let Some(provider) = body.scm_provider.clone() {
         proj.scm_provider = Some(provider);
+    }
+    if let Some(new_base_url) = body.scm_base_url.clone() {
+        proj.scm_base_url = new_base_url;
     }
     if let Some(defs) = &body.category_defs {
         proj.category_defs = defs.clone();
@@ -1895,9 +1907,11 @@ async fn list_github_commits(req: &Request, PathExtractor(id): PathExtractor<u64
         github::ScmProvider::GitHub => "RSCHIKETTO_GITHUB_TOKEN",
         github::ScmProvider::GitLab => "RSCHIKETTO_GITLAB_TOKEN",
         github::ScmProvider::Bitbucket => "RSCHIKETTO_BITBUCKET_TOKEN",
+        github::ScmProvider::Gitea => "RSCHIKETTO_GITEA_TOKEN",
+        github::ScmProvider::GitBucket => "RSCHIKETTO_GITBUCKET_TOKEN",
     };
     let token = std::env::var(token_env).ok();
-    match github::fetch_recent_commits_for(provider, repo_spec, token.as_deref()).await {
+    match github::fetch_recent_commits_for(provider, repo_spec, token.as_deref(), project.scm_base_url.as_deref()).await {
         Ok(commits) => Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&commits).unwrap_or_default())),
         Err(e) => Ok(Response::builder().status(poem::http::StatusCode::BAD_GATEWAY).body(format!("scm fetch failed: {e}"))),
     }
