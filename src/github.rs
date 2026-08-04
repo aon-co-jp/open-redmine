@@ -132,6 +132,14 @@ pub enum ScmProvider {
     GitHub,
     GitLab,
     Bitbucket,
+    /// 本家Gitea(OSS、Go製)。セルフホストが前提のためSaaS版の固定
+    /// ベースURLは無く、`Project.scm_base_url`が必須(2026-08-04追加)。
+    /// このエコシステム自製の`open-gitea`(commits一覧API自体が無い)とは
+    /// 別物。
+    Gitea,
+    /// 本家GitBucket(OSS、Scala製、GitHub API v3互換を謳う)。同じく
+    /// セルフホストのため`Project.scm_base_url`が必須(2026-08-04追加)。
+    GitBucket,
 }
 
 impl ScmProvider {
@@ -139,6 +147,8 @@ impl ScmProvider {
         match value.map(str::to_ascii_lowercase).as_deref() {
             Some("gitlab") => ScmProvider::GitLab,
             Some("bitbucket") => ScmProvider::Bitbucket,
+            Some("gitea") => ScmProvider::Gitea,
+            Some("gitbucket") => ScmProvider::GitBucket,
             _ => ScmProvider::GitHub,
         }
     }
@@ -261,6 +271,106 @@ pub async fn fetch_recent_commits_bitbucket(repo_spec: &str, token: Option<&str>
         .collect())
 }
 
+#[derive(Debug, Deserialize)]
+struct GiteaCommitAuthor {
+    name: Option<String>,
+    date: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GiteaCommitDetail {
+    message: String,
+    author: Option<GiteaCommitAuthor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GiteaCommitEntry {
+    sha: String,
+    commit: GiteaCommitDetail,
+    html_url: String,
+}
+
+/// 本家Gitea(OSS)のREST API(`GET {base}/api/v1/repos/{owner}/{repo}/
+/// commits`、レスポンス形式はGitHub API v3とほぼ同一)から直近の
+/// コミット一覧を取得する。`token`が`Some`なら`Authorization: token
+/// <TOKEN>`ヘッダー(Giteaの個人アクセストークン方式)を付与する。
+/// **正直な開示(rs-syncの`GiteaProvider`と同じ開示方針)**: この
+/// エコシステムの実行環境に実行中のGitea(OSS)インスタンスが無く、
+/// Gitea公式API仕様書に基づいて実装したのみで実サーバーに対する
+/// 実HTTP検証はまだ行っていない。
+pub async fn fetch_recent_commits_gitea(base_url: &str, repo_spec: &str, token: Option<&str>) -> anyhow::Result<Vec<GithubCommit>> {
+    if !is_valid_repo_spec(repo_spec) {
+        anyhow::bail!("invalid repo spec, expected \"owner/repo\"");
+    }
+    let url = format!("{}/api/v1/repos/{repo_spec}/commits", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url).header("User-Agent", "open-redmine").header("Accept", "application/json");
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("token {t}"));
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Gitea API returned {}", resp.status());
+    }
+    let entries: Vec<GiteaCommitEntry> = resp.json().await?;
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let message = e.commit.message;
+            let referenced_ticket_ids = parse_referenced_ticket_ids(&message);
+            GithubCommit {
+                sha: e.sha,
+                author_name: e.commit.author.as_ref().and_then(|a| a.name.clone()).unwrap_or_else(|| "unknown".to_string()),
+                date: e.commit.author.and_then(|a| a.date).unwrap_or_default(),
+                html_url: e.html_url,
+                message,
+                referenced_ticket_ids,
+            }
+        })
+        .collect())
+}
+
+/// 本家GitBucket(OSS、Scala製)のREST APIから直近のコミット一覧を取得
+/// する。GitBucketは「GitHub API v3互換」を謳っており(公式wiki
+/// 参照)、エンドポイント形状もレスポンス形状もGitHub本家と同一と
+/// 仮定して`GhCommitEntry`をそのまま再利用する
+/// (`GET {base}/api/v3/repos/{owner}/{repo}/commits`)。`token`が
+/// `Some`なら`Authorization: token <TOKEN>`ヘッダーを付与する。
+/// **正直な開示(rs-syncの`GitbucketProvider`と同じ開示方針)**: 実行
+/// 環境に実行中のGitBucketインスタンスが無く、公式ドキュメントに
+/// 基づく実装のみで実サーバーに対する実HTTP検証はまだ行っていない。
+pub async fn fetch_recent_commits_gitbucket(base_url: &str, repo_spec: &str, token: Option<&str>) -> anyhow::Result<Vec<GithubCommit>> {
+    if !is_valid_repo_spec(repo_spec) {
+        anyhow::bail!("invalid repo spec, expected \"owner/repo\"");
+    }
+    let url = format!("{}/api/v3/repos/{repo_spec}/commits", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url).header("User-Agent", "open-redmine").header("Accept", "application/vnd.github+json");
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("token {t}"));
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("GitBucket API returned {}", resp.status());
+    }
+    let entries: Vec<GhCommitEntry> = resp.json().await?;
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            let message = e.commit.message;
+            let referenced_ticket_ids = parse_referenced_ticket_ids(&message);
+            GithubCommit {
+                sha: e.sha,
+                author_name: e.commit.author.as_ref().and_then(|a| a.name.clone()).unwrap_or_else(|| "unknown".to_string()),
+                date: e.commit.author.and_then(|a| a.date).unwrap_or_default(),
+                html_url: e.html_url,
+                message,
+                referenced_ticket_ids,
+            }
+        })
+        .collect())
+}
+
 /// `is_valid_repo_spec`で既に安全な文字集合(英数字・`-`・`_`・`.`・`/`)に
 /// 限定済みのため、パーセントエンコードが必要なのは`/`(GitLabの
 /// プロジェクトIDはパス区切りではなくURLエンコードした`namespace%2Frepo`
@@ -269,13 +379,29 @@ fn urlencode_path_segment(spec: &str) -> String {
     spec.replace('/', "%2F")
 }
 
-/// `scm_provider`に応じたプロバイダへディスパッチする(2026-08-01追加)。
+/// `scm_provider`に応じたプロバイダへディスパッチする(2026-08-01追加、
+/// 2026-08-04にGitea/GitBucket対応で`base_url`引数を追加)。
 /// `list_github_commits`ハンドラ〈`main.rs`〉が呼ぶ唯一の入口。
-pub async fn fetch_recent_commits_for(provider: ScmProvider, repo_spec: &str, token: Option<&str>) -> anyhow::Result<Vec<GithubCommit>> {
+/// `base_url`はセルフホストプロバイダ(Gitea/GitBucket)にのみ使われ、
+/// それ以外(GitHub/GitLab/Bitbucket、いずれも固定SaaSベースURL)では
+/// 無視される。Gitea/GitBucketで`base_url`が`None`の場合はエラーを返す。
+pub async fn fetch_recent_commits_for(provider: ScmProvider, repo_spec: &str, token: Option<&str>, base_url: Option<&str>) -> anyhow::Result<Vec<GithubCommit>> {
     match provider {
         ScmProvider::GitHub => fetch_recent_commits(repo_spec, token).await,
         ScmProvider::GitLab => fetch_recent_commits_gitlab(repo_spec, token).await,
         ScmProvider::Bitbucket => fetch_recent_commits_bitbucket(repo_spec, token).await,
+        ScmProvider::Gitea => {
+            let Some(base) = base_url else {
+                anyhow::bail!("scm_base_url is required for a self-hosted Gitea instance");
+            };
+            fetch_recent_commits_gitea(base, repo_spec, token).await
+        }
+        ScmProvider::GitBucket => {
+            let Some(base) = base_url else {
+                anyhow::bail!("scm_base_url is required for a self-hosted GitBucket instance");
+            };
+            fetch_recent_commits_gitbucket(base, repo_spec, token).await
+        }
     }
 }
 
@@ -312,6 +438,17 @@ mod tests {
         assert_eq!(ScmProvider::parse(Some("github")), ScmProvider::GitHub);
         assert_eq!(ScmProvider::parse(Some("unknown-provider")), ScmProvider::GitHub);
         assert_eq!(ScmProvider::parse(None), ScmProvider::GitHub);
+        assert_eq!(ScmProvider::parse(Some("gitea")), ScmProvider::Gitea);
+        assert_eq!(ScmProvider::parse(Some("Gitea")), ScmProvider::Gitea);
+        assert_eq!(ScmProvider::parse(Some("gitbucket")), ScmProvider::GitBucket);
+    }
+
+    #[tokio::test]
+    async fn fetch_recent_commits_for_gitea_and_gitbucket_require_a_base_url() {
+        let err = fetch_recent_commits_for(ScmProvider::Gitea, "owner/repo", None, None).await.unwrap_err();
+        assert!(err.to_string().contains("scm_base_url is required"));
+        let err = fetch_recent_commits_for(ScmProvider::GitBucket, "owner/repo", None, None).await.unwrap_err();
+        assert!(err.to_string().contains("scm_base_url is required"));
     }
 
     #[test]

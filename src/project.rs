@@ -47,6 +47,13 @@ pub struct Project {
     /// 全てGitHubリポジトリだったため)。
     #[serde(default)]
     pub scm_provider: Option<String>,
+    /// `scm_provider`が`"gitea"`/`"gitbucket"`(いずれもセルフホストが
+    /// 前提でSaaS版が無い)の場合に必須のインスタンスベースURL
+    /// (例: `"https://gitea.example.com"`、末尾スラッシュ有無どちらも可、
+    /// 2026-08-04追加)。GitHub/GitLab(gitlab.com)/Bitbucket(bitbucket.org)
+    /// はSaaS版のためこのフィールドは無視される。
+    #[serde(default)]
+    pub scm_base_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -142,6 +149,7 @@ mod tests {
             category_defs: Vec::new(),
             github_repo: None,
             scm_provider: None,
+            scm_base_url: None,
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         });
@@ -168,6 +176,7 @@ mod tests {
             category_defs: Vec::new(),
             github_repo: None,
             scm_provider: None,
+            scm_base_url: None,
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
         };

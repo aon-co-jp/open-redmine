@@ -82,6 +82,51 @@ VPS上の作業パス: `/root/open-redmine`。
 
 ## HANDOFF
 
+- **2026-08-04 Gitea(OSS)・GitBucket(OSS)連携を追加(横断バックログの
+  最後の未対応プロバイダ2件、`rs-sync`が先行実装済みの`GiteaProvider`/
+  `GitbucketProvider`と同じ「ドキュメント準拠で実装するが実サーバー未検証」
+  という開示方針を踏襲)**:
+  1. **設計**: `ScmProvider`に`Gitea`/`GitBucket`variantを追加。
+     いずれもセルフホストが前提でSaaS固定ベースURLが無いため、
+     `Project.scm_base_url: Option<String>`(新規フィールド、二重
+     `Option`パターンで`PUT`時に変更・解除可能)を追加し、
+     `fetch_recent_commits_for`のシグネチャに`base_url: Option<&str>`
+     引数を追加(GitHub/GitLab/Bitbucketは無視、Gitea/GitBucketは
+     `None`ならエラー)。`fetch_recent_commits_gitea`
+     (`GET {base}/api/v1/repos/{owner}/{repo}/commits`、
+     `Authorization: token <TOKEN>`)・`fetch_recent_commits_gitbucket`
+     (`GET {base}/api/v3/repos/{owner}/{repo}/commits`、GitBucketの
+     「GitHub API v3互換」を謳う公式説明に基づき既存の`GhCommitEntry`
+     形状をそのまま再利用)を新設。トークンは
+     `RSCHIKETTO_GITEA_TOKEN`/`RSCHIKETTO_GITBUCKET_TOKEN`環境変数
+     (任意)。
+  2. **フロントエンド**: プロジェクト作成フォームのSCMプロバイダ
+     `<select>`にGitea/GitBucketを追加、`new-project-scm-base-url`
+     入力欄(Gitea/GitBucket選択時のみ必須、それ以外は無視される)を
+     新設。
+  3. **正直な開示・未対応範囲**: このエコシステムの実行環境に実行中の
+     本家Gitea(OSS)・GitBucket(OSS)インスタンスが無く、公式API
+     ドキュメントに基づいて実装したのみで**実サーバーに対する実HTTP
+     検証はまだ一度も行っていない**(`rs-sync`の`GiteaProvider`/
+     `GitbucketProvider`と全く同じ制約)。当初VPS(conoha)上にDockerで
+     検証用インスタンスを新規に立てる計画だったが、VPSディスクが
+     満杯(99GB中98GB使用、空き0バイト、主因`/root/aon.tokyo/`の
+     個人データ72GB)と判明し、ディスク拡張はユーザー側の契約変更が
+     必要なため今回のセッションでは実施できなかった——ディスク拡張後、
+     `rs-sync`の検証(タスク#3)と合わせて最優先で実施すること。
+  4. **検証(実測)**: メインクレート`cargo test`**93→94件、全green**
+     (新規1件`fetch_recent_commits_for_gitea_and_gitbucket_require_a_
+     base_url`——`base_url`未指定時のエラーメッセージを確認、既存の
+     `ScmProvider::parse`テストにもGitea/GitBucketの2パターンを追加)。
+     `web/`側`cargo build --target wasm32-unknown-unknown --release`
+     成功(既存警告のみ、新規警告なし)。
+  - 次にすべきこと: (1) VPSディスク拡張後、本家Gitea/GitBucketを
+    Dockerで実際に起動し、`fetch_recent_commits_gitea`/
+    `fetch_recent_commits_gitbucket`を実HTTPで検証、(2) 検証後
+    `#[ignore]`付き実ネットワークテストを追加(GitLab/Bitbucketの
+    既存パターンに揃える)、(3) 本番(`easy-web.tokyo/open-redmine`)への
+    デプロイ。
+
 - **2026-08-03 GitLab/Bitbucket連携を追加(ユーザー指示「open-redmine の
   Github、Gitbucket、Bitbucket、Gitlab、Giteaなどの連携対応」への対応、
   横断バックログ4項目中の最後の1件)**:
