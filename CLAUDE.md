@@ -4,7 +4,10 @@
 `CLAUDE.md`を正本とし、各プロジェクトへコピーして同期する方針に準じる。
 GitHubリポジトリ: [aon-co-jp/open-redmine](https://github.com/aon-co-jp/open-redmine)
 (旧名`RS-Chiketto`→2026-07-22に`RS-Red`→2026-07-27に`open-redmine`へ改名)。
-VPS上の作業パス: `/root/open-redmine`。
+VPS上の作業パス: `/root/repository/open-redmine`(2026-08-28、VPS
+ディレクトリ構成整理によりリポジトリは`/root/repository/`配下へ移動。
+旧パス`/root/open-redmine`はシンボリックリンクとして残しており、
+systemdサービス等既存の参照はそのまま機能する)。
 公開先: `https://easy-web.tokyo/open-redmine`(デモ環境:
 `https://easy-web.tokyo/open-redmine/demo`)。
 
