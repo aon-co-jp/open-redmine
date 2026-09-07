@@ -28,7 +28,29 @@ const EMAIL_KEY: &str = "rsred_session_email";
 /// 問題で採用した「マウント先を固定のプレフィックス定数として持つ」
 /// 方式をここでも踏襲する。別の場所にマウントする場合はこの値を書き換える
 /// こと(複数マウント先の動的対応は今回のスコープ外、正直な開示)。
-const BASE_PATH: &str = "/open-redmine";
+/// マウント先のパスプレフィックス。**2026-09-07修正**: 以前は
+/// `"/open-redmine"`固定の定数だったが、同じ静的アセット
+/// (`index.html`/`pkg/`)を本番(`/open-redmine`)とデモ
+/// (`/open-redmine/demo`)の**両方**が共有する構成(2026-09-07新設の
+/// ログイン不要デモ、`RSCHIKETTO_REQUIRE_AUTH`参照)になったため、
+/// 固定文字列では**デモ環境が実際には本番バックエンドのAPIを叩いて
+/// しまう**という実バグが発生した(`/open-redmine/demo/`で開いても
+/// `fetch("/open-redmine/api/...")`となり`/demo`が脱落、本番の
+/// `path_prefix="/open-redmine"`にマッチしてしまう——実際に本番稼働中の
+/// VPSで発見・確認済み)。`location.pathname`から実際のマウント先を
+/// 動的に判定するよう変更した(既知の2マウント先のみ対応、それ以外の
+/// パスでは空文字列にフォールバック——`rs-sync`が過去に踏んだ「trailing
+/// slash/base pathの罠」と同種の教訓)。
+fn base_path() -> String {
+    let pathname = window().location().pathname().unwrap_or_default();
+    if pathname.starts_with("/open-redmine/demo") {
+        "/open-redmine/demo".to_string()
+    } else if pathname.starts_with("/open-redmine") {
+        "/open-redmine".to_string()
+    } else {
+        String::new()
+    }
+}
 
 fn window() -> web_sys::Window {
     web_sys::window().expect("no global window")
@@ -157,7 +179,7 @@ async fn api(method: &str, path: &str, body: Option<String>) -> Result<(u16, Str
     if let Some(b) = &body {
         opts.set_body(&JsValue::from_str(b));
     }
-    let url = format!("{BASE_PATH}{path}");
+    let url = format!("{}{path}", base_path());
     let request = Request::new_with_str_and_init(&url, &opts)?;
     request.headers().set("Content-Type", "application/json")?;
     if let Some(token) = session_token() {
@@ -1219,7 +1241,7 @@ async fn upload_attachment(ticket_id: u64) -> Result<bool, JsValue> {
     opts.set_method("POST");
     opts.set_mode(RequestMode::SameOrigin);
     opts.set_body(&form_data);
-    let url = format!("{BASE_PATH}/api/tickets/{ticket_id}/attachments");
+    let url = format!("{}/api/tickets/{ticket_id}/attachments", base_path());
     let request = Request::new_with_str_and_init(&url, &opts)?;
     if let Some(token) = session_token() {
         request.headers().set("Authorization", &format!("Bearer {token}"))?;
@@ -1259,7 +1281,7 @@ async fn download_attachment_inner(attachment_id: u64) -> Result<(), JsValue> {
     let mut opts = RequestInit::new();
     opts.set_method("GET");
     opts.set_mode(RequestMode::SameOrigin);
-    let url = format!("{BASE_PATH}/api/attachments/{attachment_id}/download");
+    let url = format!("{}/api/attachments/{attachment_id}/download", base_path());
     let request = Request::new_with_str_and_init(&url, &opts)?;
     if let Some(token) = session_token() {
         request.headers().set("Authorization", &format!("Bearer {token}"))?;

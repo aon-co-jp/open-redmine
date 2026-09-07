@@ -85,7 +85,7 @@ export interface InitOutput {
     readonly delete_relation: (a: number) => void;
     readonly delete_time_entry: (a: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__h0420fbd9399d5376: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__h09a373c24dbcf94e: (a: number, b: number) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__he3fdcf35476492a1: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
