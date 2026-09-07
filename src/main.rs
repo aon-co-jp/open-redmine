@@ -63,12 +63,27 @@ struct AppState {
     /// 既定は`LocalFsBackend`)。全`Store`の`load`/`save`はこれ経由で
     /// I/Oを行う(`storage.rs`参照)。
     backend: Arc<dyn storage::StorageBackend>,
+    /// `RSCHIKETTO_REQUIRE_AUTH`(既定`true`)。2026-09-07新設、ユーザー
+    /// 報告「デモ環境(`/open-redmine/demo`)でログインを要求されるのは
+    /// おかしい、デモ系は全てログイン不要にすべき」への対応。`false`の
+    /// 場合、`session_email()`が常に`admin_email`としてログイン済み
+    /// 扱いになる(唯一の変更点。以降の`require_admin_session`/
+    /// `require_admin_or_project_manager`/`check_project_access`は
+    /// いずれも`session_email()`経由で判定するため、この1箇所の変更で
+    /// 全ての認証ゲートが無条件で通るようになる)。**本番では絶対に
+    /// `false`にしないこと**——デモ専用の別プロセス・別データディレクトリ
+    /// でのみ使う設計(`rs-sync`の`RS_SYNC_REQUIRE_AUTH`と同じパターン、
+    /// 詳細はCLAUDE.md HANDOFF参照)。
+    require_auth: bool,
 }
 
 fn require_admin_session(req: &Request, state: &AppState) -> PoemResult<()> {
-    let header = req.header(poem::http::header::AUTHORIZATION).unwrap_or("");
-    let token = header.strip_prefix("Bearer ").unwrap_or("");
-    match state.auth.session_email(token) {
+    // 2026-09-07修正: 従来ここは`state.auth.session_email(token)`を直接
+    // 呼んでおり、下の`session_email(req, state)`関数に追加した
+    // `require_auth`バイパスを経由していなかった(発見した実バグ——
+    // `RSCHIKETTO_REQUIRE_AUTH=false`にしても、この関数経由の全ての
+    // 管理者専用操作〈プロジェクト作成等〉は引き続き401になっていた)。
+    match session_email(req, state) {
         Some(email) if email == state.admin_email => Ok(()),
         _ => Err(poem::Error::from_string("admin login required", poem::http::StatusCode::UNAUTHORIZED)),
     }
@@ -78,9 +93,26 @@ fn require_admin_session(req: &Request, state: &AppState) -> PoemResult<()> {
 /// アドレスを取得する(未ログインなら`None`、管理者・一般アカウント
 /// いずれも区別しない)。
 fn session_email(req: &Request, state: &AppState) -> Option<String> {
+    if !state.require_auth {
+        // デモ環境(RSCHIKETTO_REQUIRE_AUTH=false)では、実際のトークンの
+        // 有無・正当性を一切見ず、常に管理者としてログイン済み扱いにする
+        // (2026-09-07新設、AppStateのdocコメント参照)。
+        return Some(state.admin_email.clone());
+    }
     let header = req.header(poem::http::header::AUTHORIZATION).unwrap_or("");
     let token = header.strip_prefix("Bearer ").unwrap_or("");
     state.auth.session_email(token)
+}
+
+/// このサーバーがログインを要求するかどうかを、未認証のまま問い合わせ
+/// られる公開エンドポイント(2026-09-07新設)。ブラウザGUI(`web/`)は
+/// 起動時にこれを呼び、`require_auth: false`ならログインパネルを出さず
+/// 最初からログイン済みとして扱う(`rs-sync`の`probeAuthRequirement()`と
+/// 同じパターン、詳細はCLAUDE.md HANDOFF参照)。
+#[handler]
+async fn auth_config(state: Data<&AppState>) -> PoemResult<Response> {
+    let body = serde_json::json!({ "require_auth": state.require_auth });
+    Ok(Response::builder().status(poem::http::StatusCode::OK).content_type("application/json").body(serde_json::to_vec(&body).unwrap_or_default()))
 }
 
 /// グローバル管理者、または`project_id`に対する
@@ -1955,6 +1987,7 @@ fn build_routes(state: AppState) -> impl poem::Endpoint {
         .at("/", get(index))
         .at("/pkg/:file", get(serve_pkg))
         .at("/healthz", get(healthz))
+        .at("/api/auth/config", get(auth_config))
         .at("/api/auth/request-otp", post(request_otp))
         .at("/api/auth/verify-otp", post(verify_otp))
         .at("/api/auth/logout", post(logout))
@@ -2005,7 +2038,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("account registration is locked to the admin email only (RSCHIKETTO_ACCOUNTS_LOCKED=false to lift)");
     }
     let backend = storage::backend_from_env();
-    let state = AppState { data_root, auth: Arc::new(auth::AuthStore::default()), admin_email, smtp, accounts_locked, backend };
+    // 2026-09-07新設(ユーザー報告「デモ環境でログインを要求されるのは
+    // おかしい」への対応): 既定`true`(本番と同じ挙動)。デモ専用の
+    // 別プロセスでのみ`RSCHIKETTO_REQUIRE_AUTH=false`を設定すること
+    // (AppState.require_authのdocコメント参照)。
+    let require_auth = std::env::var("RSCHIKETTO_REQUIRE_AUTH").map(|v| v != "false" && v != "0").unwrap_or(true);
+    if !require_auth {
+        tracing::warn!("RSCHIKETTO_REQUIRE_AUTH=false: all requests are treated as already logged in as {admin_email} — do NOT use this for a production instance");
+    }
+    let state = AppState { data_root, auth: Arc::new(auth::AuthStore::default()), admin_email, smtp, accounts_locked, require_auth, backend };
 
     tracing::info!("storage backend: {} (RSCHIKETTO_STORAGE_BACKEND)", storage::selected_backend_name());
     ddns::spawn_if_configured();
@@ -2042,7 +2083,7 @@ mod handler_tests {
     async fn make_state(label: &str, accounts_locked: bool) -> AppState {
         let data_root = temp_dir(label);
         tokio::fs::create_dir_all(&data_root).await.unwrap();
-        AppState { data_root, auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked, backend: std::sync::Arc::new(storage::LocalFsBackend) }
+        AppState { data_root, auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) }
     }
 
     /// 管理者としてログイン済みのセッショントークンを、OTPフローを経由
@@ -2441,7 +2482,7 @@ mod handler_tests {
         // 新しいAppStateを同じdata_rootで作り直し(auth::AuthStoreは
         // プロセスごとに新規になるため、このAppStateに対応する
         // TestClientでセッションを発行して検証する)。
-        let state2 = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let state2 = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let member_session = state2.auth.create_session("member@example.com");
         let app2 = build_routes(state2);
         let client2 = TestClient::new(app2);
@@ -2455,7 +2496,7 @@ mod handler_tests {
         resp.assert_status(poem::http::StatusCode::CREATED);
 
         // 別の(許可されていない)一般ユーザーは403。
-        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
         let stranger_app = build_routes(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
@@ -2564,7 +2605,7 @@ mod handler_tests {
             .assert_status(poem::http::StatusCode::UNAUTHORIZED);
 
         // editが無い一般ユーザーは403。
-        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
         let stranger_app = build_routes(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
@@ -2580,7 +2621,7 @@ mod handler_tests {
         let mut config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
         config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true, allow_manage_members: false });
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
-        let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let member_session = member_state.auth.create_session("member@example.com");
         let member_app = build_routes(member_state);
         let member_client = TestClient::new(member_app);
@@ -2635,7 +2676,7 @@ mod handler_tests {
         client.get(format!("/api/tickets/{ticket_id}/comments")).send().await.assert_status(poem::http::StatusCode::UNAUTHORIZED);
 
         // 権限の無い一般ユーザーは403。
-        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
         let stranger_app = build_routes(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
@@ -2650,7 +2691,7 @@ mod handler_tests {
         let mut config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
         config.accounts.insert("viewer@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: false, allow_manage_members: false });
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
-        let viewer_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let viewer_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let viewer_session = viewer_state.auth.create_session("viewer@example.com");
         let viewer_app = build_routes(viewer_state);
         let viewer_client = TestClient::new(viewer_app);
@@ -2715,7 +2756,7 @@ mod handler_tests {
             .assert_status(poem::http::StatusCode::BAD_REQUEST);
 
         // editが無い一般ユーザーは改訂できない(403)。
-        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
         let stranger_app = build_routes(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
@@ -3113,7 +3154,7 @@ mod handler_tests {
             .assert_status(poem::http::StatusCode::UNAUTHORIZED);
 
         // editが無い一般ユーザーは403。
-        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
         let stranger_app = build_routes(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
@@ -3219,7 +3260,7 @@ mod handler_tests {
             .assert_status(poem::http::StatusCode::UNAUTHORIZED);
 
         // editが無い一般ユーザーは403。
-        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
         let stranger_app = build_routes(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
@@ -3268,7 +3309,7 @@ mod handler_tests {
         let mut config = access::load(&data_root, project_id, &storage::LocalFsBackend).await;
         config.accounts.insert("member@example.com".to_string(), access::AccountPermission { allow_view: true, allow_edit: true, allow_manage_members: false });
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
-        let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
+        let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let member_session = member_state.auth.create_session("member@example.com");
         let member_app = build_routes(member_state);
         let member_client = TestClient::new(member_app);
