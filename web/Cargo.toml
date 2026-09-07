@@ -21,6 +21,7 @@ version = "0.3"
 features = [
     "console",
     "Window",
+    "Location",
     "Document",
     "Element",
     "DomTokenList",
