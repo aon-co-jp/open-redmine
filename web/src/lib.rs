@@ -92,6 +92,31 @@ fn session_token() -> Option<String> {
     local_storage().get_item(SESSION_KEY).ok().flatten()
 }
 
+/// このサーバーが実際にログインを要求するか(`GET /api/auth/config`)を
+/// 起動時に確認し、`require_auth: false`(デモ環境)ならログインパネルを
+/// 一切出さず、最初からログイン済み扱いにする(2026-09-07新設、
+/// ユーザー報告「デモ環境でログインを要求されるのはおかしい」への対応)。
+///
+/// **`rs-sync`が2026-07-30に踏んだ教訓**: サーバー側だけ`REQUIRE_AUTH=
+/// false`にしても、フロントエンドが独自に(`localStorage`のセッション
+/// トークンの有無だけで)ログイン状態を判定していると、ログインパネルは
+/// 消えない——サーバーの認証要件を能動的に問い合わせる必要がある。
+/// ここではサーバーが返すダミーの疑似トークン("no-auth-required"、
+/// サーバー側は`require_auth: false`の間トークンの中身を一切見ないため
+/// 何を入れても構わない)を`localStorage`へ書き込み、`session_token()`が
+/// `Some`を返すようにすることで、既存の「ログイン済みならAPIヘッダへ
+/// トークンを付ける」既存ロジックとも自然に噛み合わせる。
+async fn probe_auth_requirement() {
+    let Ok((200, text)) = api("GET", "/api/auth/config", None).await else { return };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let require_auth = value.get("require_auth").and_then(|v| v.as_bool()).unwrap_or(true);
+    if !require_auth {
+        let storage = local_storage();
+        let _ = storage.set_item(SESSION_KEY, "no-auth-required");
+        let _ = storage.set_item(EMAIL_KEY, "demo@open-redmine.local");
+    }
+}
+
 /// 現在選択中のプロジェクトID。
 ///
 /// **2026-07-27追記(実クリックE2Eで発見した実バグの修正)**: 以前は
@@ -278,10 +303,18 @@ pub fn start() {
     wire_ticket_detail();
     wire_wiki();
     wire_feature_mode();
-    refresh_auth_view();
-    if session_token().is_some() {
-        wasm_bindgen_futures::spawn_local(async { load_projects().await });
-    }
+    // 2026-09-07新設: `probe_auth_requirement()`がデモ環境
+    // (`require_auth: false`)を検出した場合に限り、既定のログイン
+    // パネル表示より先に疑似セッションを`localStorage`へ書き込む。
+    // 通常の(本番)環境ではこのAPI呼び出しは`require_auth: true`を
+    // 返すのみで何も変えず、従来通りのログインフローになる。
+    wasm_bindgen_futures::spawn_local(async {
+        probe_auth_requirement().await;
+        refresh_auth_view();
+        if session_token().is_some() {
+            load_projects().await;
+        }
+    });
 }
 
 fn console_error_panic_hook() {
