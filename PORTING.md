@@ -248,3 +248,10 @@ let bytes = serde_json::to_vec_pretty(store).expect("...");
 - テスト: `cargo test` 96件成功(`connect_tests`: 旧REST404・401・415・400・重複キー400・正常200・添付のbase64往復)。実サーバー+ブラウザ(Browser pane)で プロジェクト/チケット/コメント/工数/添付(作成・ダウンロード)/Wiki を操作し、全て200を確認。
 - **未了/正直な注意**: 本番(VPS)への反映は未実施(WSLリリースビルド→glibc確認→入れ替えが必要。前面のopen-web-serverのパスプレフィックス転送は `/open-redmine/open_redmine.v1.*` がそのまま通る想定だが未確認)。以下の旧REST表記の表・`RUST-API-GUIDE*.md` の `/api/...` は**廃止前の記述**で、上の対応表で読み替えること。
 
+
+## 本番(VPS)反映の記録 (2026-11-08)
+- `6612f6b`(REST全廃・Connect化)を VPS へ反映。WSLでリリースビルド(必要glibc 2.34、VPSは2.39)→ scp → バックアップ(`/root/rd-bak-20261108-065255`)→ 入れ替え(バイナリ `rs-chiketto` と `web/index.html`・`web/pkg`)→ `open-redmine`(8100)と `open-redmine-demo`(8113)を再起動。VPSではビルドしていない。
+- 確認: 両ポートで `/` が200、旧 `/api/projects` が404、Connect `open_redmine.v1.Projects/List` が200・`Projects/Create` に空本文で400、画面は白画面でなくログイン表示、コンソールエラー無し。ロールバックは発生せず。
+- 未確認: 認証つきの通し操作(ログイン後の画面操作)は未実施。
+
+Deployed `6612f6b` (REST removed, Connect) to the VPS on 2026-11-08: built in WSL (needs glibc 2.34; VPS has 2.39), backed up, swapped binary + web assets, restarted the main and demo services. Old `/api/projects` is 404, Connect calls respond, UI renders. No rollback. Authenticated end-to-end flows were not exercised.
