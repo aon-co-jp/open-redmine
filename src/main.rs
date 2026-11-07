@@ -25,6 +25,7 @@ mod accounts;
 mod attachments;
 mod auth;
 mod comments;
+mod connect;
 mod ddns;
 mod github;
 mod github_webhook;
@@ -1982,11 +1983,8 @@ fn env_data_dir() -> PathBuf {
 
 /// ルーティング定義を`main()`とテスト(`poem::test::TestClient`)の両方から
 /// 再利用できるように切り出したもの。
-fn build_routes(state: AppState) -> impl poem::Endpoint {
+fn build_internal(state: AppState) -> impl poem::Endpoint {
     Route::new()
-        .at("/", get(index))
-        .at("/pkg/:file", get(serve_pkg))
-        .at("/healthz", get(healthz))
         .at("/api/auth/config", get(auth_config))
         .at("/api/auth/request-otp", post(request_otp))
         .at("/api/auth/verify-otp", post(verify_otp))
@@ -2017,7 +2015,23 @@ fn build_routes(state: AppState) -> impl poem::Endpoint {
         .at("/api/projects/:id/github/commits", get(list_github_commits))
         .at("/api/github/webhook", post(receive_github_webhook))
         .data(state)
-        .with(Tracing)
+}
+
+/// 公開ルーター。REST全廃(2026-11-04方針)により、公開するAPIは
+/// Connect(`POST /open_redmine.v1.<Service>/<Method>`)のみ。
+/// 例外(相手の規格が形を決めるもの): 画面・静的ファイル・ヘルスチェック・
+/// GitHub Webhook(`X-Hub-Signature-256`署名検証)。
+fn build_routes(state: AppState) -> impl poem::Endpoint {
+    let inner = connect::share(build_internal(state.clone()));
+    let mut app = Route::new()
+        .at("/", get(index))
+        .at("/pkg/:file", get(serve_pkg))
+        .at("/healthz", get(healthz))
+        .at("/api/github/webhook", post(receive_github_webhook));
+    for p in connect::paths() {
+        app = app.at(p, post(connect::endpoint(inner.clone())));
+    }
+    app.data(state).with(Tracing)
 }
 
 #[tokio::main]
@@ -2108,7 +2122,7 @@ mod handler_tests {
         std::env::remove_var("RSCHIKETTO_DEV_LOG_OTP");
 
         let state = make_state("otp-503-default", true).await;
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let resp = client
@@ -2128,7 +2142,7 @@ mod handler_tests {
         std::env::set_var("RSCHIKETTO_DEV_LOG_OTP", "true");
 
         let state = make_state("otp-dev-bypass", true).await;
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let resp = client
@@ -2147,7 +2161,7 @@ mod handler_tests {
         // 401ではなく200・空配列(project単位のフィルタリングにより
         // 可視チケットが0件になるため)。
         let state = make_state("list-empty", true).await;
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let resp = client.get("/api/tickets").send().await;
@@ -2186,7 +2200,7 @@ mod handler_tests {
     async fn self_service_account_request_returns_201_and_creates_pending_request() {
         let state = make_state("self-service-request", true).await;
         let data_root = state.data_root.clone();
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let resp = client
@@ -2206,7 +2220,7 @@ mod handler_tests {
         let state = make_state("approve-grants-access", false).await;
         let data_root = state.data_root.clone();
         let token = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         // まず自己申請を作成。
@@ -2260,7 +2274,7 @@ mod handler_tests {
         // マネージャー役のセッショントークンも、OTPフローを経由せず
         // `AuthStore`へ直接発行させる(`admin_token`と同じテスト用手段)。
         let manager_token = state.auth.create_session("manager@example.com");
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         // プロジェクトマネージャー自身のアカウントを登録し、project_id=1に
@@ -2324,7 +2338,7 @@ mod handler_tests {
         let state = make_state("locked-rejects-approval", true).await;
         let data_root = state.data_root.clone();
         let token = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         client
@@ -2360,7 +2374,7 @@ mod handler_tests {
     async fn project_crud_via_http() {
         let state = make_state("project-crud", true).await;
         let token = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         // 非管理者(未ログイン)は作成できない。
@@ -2430,7 +2444,7 @@ mod handler_tests {
     async fn create_ticket_against_nonexistent_project_fails_cleanly() {
         let state = make_state("ticket-nonexistent-project", true).await;
         let token = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let resp = client
@@ -2451,7 +2465,7 @@ mod handler_tests {
         let state = make_state("access-control-real-project-id", true).await;
         let data_root = state.data_root.clone();
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         // 管理者がプロジェクトを作成。
@@ -2484,7 +2498,7 @@ mod handler_tests {
         // TestClientでセッションを発行して検証する)。
         let state2 = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let member_session = state2.auth.create_session("member@example.com");
-        let app2 = build_routes(state2);
+        let app2 = build_internal(state2);
         let client2 = TestClient::new(app2);
 
         let resp = client2
@@ -2498,7 +2512,7 @@ mod handler_tests {
         // 別の(許可されていない)一般ユーザーは403。
         let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
-        let stranger_app = build_routes(stranger_state);
+        let stranger_app = build_internal(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
         stranger_client
             .post("/api/tickets")
@@ -2516,7 +2530,7 @@ mod handler_tests {
     async fn subproject_hierarchy_children_listing_and_cycle_rejection() {
         let state = make_state("subproject-hierarchy", true).await;
         let token = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         // ルートプロジェクトを作成。
@@ -2575,7 +2589,7 @@ mod handler_tests {
         let state = make_state("comment-create-gated", true).await;
         let data_root = state.data_root.clone();
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let created = client
@@ -2607,7 +2621,7 @@ mod handler_tests {
         // editが無い一般ユーザーは403。
         let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
-        let stranger_app = build_routes(stranger_state);
+        let stranger_app = build_internal(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
         stranger_client
             .post(format!("/api/tickets/{ticket_id}/comments"))
@@ -2623,7 +2637,7 @@ mod handler_tests {
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
         let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let member_session = member_state.auth.create_session("member@example.com");
-        let member_app = build_routes(member_state);
+        let member_app = build_internal(member_state);
         let member_client = TestClient::new(member_app);
         let posted = member_client
             .post(format!("/api/tickets/{ticket_id}/comments"))
@@ -2645,7 +2659,7 @@ mod handler_tests {
         let state = make_state("comment-view-gated", true).await;
         let data_root = state.data_root.clone();
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let created = client
@@ -2678,7 +2692,7 @@ mod handler_tests {
         // 権限の無い一般ユーザーは403。
         let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
-        let stranger_app = build_routes(stranger_state);
+        let stranger_app = build_internal(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
         stranger_client
             .get(format!("/api/tickets/{ticket_id}/comments"))
@@ -2693,7 +2707,7 @@ mod handler_tests {
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
         let viewer_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let viewer_session = viewer_state.auth.create_session("viewer@example.com");
-        let viewer_app = build_routes(viewer_state);
+        let viewer_app = build_internal(viewer_state);
         let viewer_client = TestClient::new(viewer_app);
         let resp = viewer_client
             .get(format!("/api/tickets/{ticket_id}/comments"))
@@ -2716,7 +2730,7 @@ mod handler_tests {
         let state = make_state("wiki-lifecycle", true).await;
         let data_root = state.data_root.clone();
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let created = client
@@ -2758,7 +2772,7 @@ mod handler_tests {
         // editが無い一般ユーザーは改訂できない(403)。
         let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
-        let stranger_app = build_routes(stranger_state);
+        let stranger_app = build_internal(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
         stranger_client
             .put(format!("/api/wiki/{page_id}"))
@@ -2812,7 +2826,7 @@ mod handler_tests {
     async fn ticket_gantt_fields_are_persisted_and_validated() {
         let state = make_state("ticket-gantt-fields", true).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let created_project = client
@@ -2883,7 +2897,7 @@ mod handler_tests {
     async fn list_tickets_supports_status_and_project_id_filters() {
         let state = make_state("ticket-list-filters", true).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let mut project_ids = Vec::new();
@@ -2960,7 +2974,7 @@ mod handler_tests {
     async fn ticket_tracker_defaults_to_bug_is_filterable_and_updatable() {
         let state = make_state("ticket-tracker", true).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let project = client
@@ -3024,7 +3038,7 @@ mod handler_tests {
     async fn ticket_assignee_must_be_a_registered_account_and_is_filterable() {
         let state = make_state("ticket-assignee", false).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let project = client
@@ -3116,7 +3130,7 @@ mod handler_tests {
         let state = make_state("relation-lifecycle", true).await;
         let data_root = state.data_root.clone();
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let project = client
@@ -3156,7 +3170,7 @@ mod handler_tests {
         // editが無い一般ユーザーは403。
         let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
-        let stranger_app = build_routes(stranger_state);
+        let stranger_app = build_internal(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
         stranger_client
             .post(format!("/api/tickets/{blocker_id}/relations"))
@@ -3230,7 +3244,7 @@ mod handler_tests {
         let state = make_state("time-entry-lifecycle", true).await;
         let data_root = state.data_root.clone();
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let project = client
@@ -3262,7 +3276,7 @@ mod handler_tests {
         // editが無い一般ユーザーは403。
         let stranger_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let stranger_session = stranger_state.auth.create_session("stranger@example.com");
-        let stranger_app = build_routes(stranger_state);
+        let stranger_app = build_internal(stranger_state);
         let stranger_client = TestClient::new(stranger_app);
         stranger_client
             .post(format!("/api/tickets/{ticket_id}/time_entries"))
@@ -3311,7 +3325,7 @@ mod handler_tests {
         access::save(&data_root, project_id, &config, &storage::LocalFsBackend).await.unwrap();
         let member_state = AppState { data_root: data_root.clone(), auth: Arc::new(auth::AuthStore::default()), admin_email: ADMIN_EMAIL.to_string(), smtp: None, accounts_locked: true, require_auth: true, backend: std::sync::Arc::new(storage::LocalFsBackend) };
         let member_session = member_state.auth.create_session("member@example.com");
-        let member_app = build_routes(member_state);
+        let member_app = build_internal(member_state);
         let member_client = TestClient::new(member_app);
         member_client
             .delete(format!("/api/time_entries/{entry_id}"))
@@ -3336,7 +3350,7 @@ mod handler_tests {
     async fn ticket_custom_fields_must_be_defined_on_the_project() {
         let state = make_state("custom-fields", false).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let project = client
@@ -3402,7 +3416,7 @@ mod handler_tests {
         let state = make_state("role-preset", false).await;
         let data_root = state.data_root.clone();
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let project = client.post("/api/projects").header("Authorization", format!("Bearer {admin}")).body_json(&serde_json::json!({ "name": "role-proj" })).send().await;
@@ -3488,7 +3502,7 @@ mod handler_tests {
         let state = make_state("saved-queries", false).await;
         let admin = admin_token(&state);
         let stranger_token = state.auth.create_session("stranger@example.com");
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = TestClient::new(app);
 
         let project = client.post("/api/projects").header("Authorization", format!("Bearer {admin}")).body_json(&serde_json::json!({ "name": "sq-proj" })).send().await;
@@ -3577,7 +3591,7 @@ mod handler_tests {
         let state = make_state("ticket-assign-resolve", false).await;
         let admin = admin_token(&state);
         let data_root = state.data_root.clone();
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = poem::test::TestClient::new(app);
 
         client
@@ -3662,7 +3676,7 @@ mod handler_tests {
     async fn ticket_priority_defaults_to_normal_and_is_settable_on_create_and_update() {
         let state = make_state("ticket-priority", true).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = poem::test::TestClient::new(app);
 
         let project = client
@@ -3716,7 +3730,7 @@ mod handler_tests {
     async fn ticket_created_at_and_updated_at_are_tracked() {
         let state = make_state("ticket-timestamps", true).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = poem::test::TestClient::new(app);
 
         let project = client
@@ -3761,7 +3775,7 @@ mod handler_tests {
     async fn ticket_category_must_be_defined_on_the_project() {
         let state = make_state("ticket-category", true).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = poem::test::TestClient::new(app);
 
         let project = client
@@ -3825,7 +3839,7 @@ mod handler_tests {
     async fn github_commits_endpoint_requires_login_and_a_configured_repo() {
         let state = make_state("github-commits", true).await;
         let admin = admin_token(&state);
-        let app = build_routes(state);
+        let app = build_internal(state);
         let client = poem::test::TestClient::new(app);
 
         let project = client
@@ -3855,5 +3869,94 @@ mod handler_tests {
             .send()
             .await
             .assert_status(poem::http::StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod connect_tests {
+    //! 公開面(Connect)のテスト: 旧RESTの経路が404、認証なし401、
+    //! 不正入力400、重複キー400、正常200、添付のbase64往復。
+    use super::*;
+    use poem::http::StatusCode;
+    use poem::test::TestClient;
+
+    async fn state() -> AppState {
+        let data_root = std::env::temp_dir().join(format!("rschiketto-connect-test-{}", accounts::generate_request_id()));
+        tokio::fs::create_dir_all(&data_root).await.unwrap();
+        AppState {
+            data_root,
+            auth: Arc::new(auth::AuthStore::default()),
+            admin_email: "admin@example.com".to_string(),
+            smtp: None,
+            accounts_locked: true,
+            require_auth: true,
+            backend: std::sync::Arc::new(storage::LocalFsBackend),
+        }
+    }
+
+    #[tokio::test]
+    async fn old_rest_routes_are_gone() {
+        let c = TestClient::new(build_routes(state().await));
+        for p in ["/api/tickets", "/api/projects", "/api/auth/config", "/api/accounts", "/api/wiki/1"] {
+            c.get(p).send().await.assert_status(StatusCode::NOT_FOUND);
+            c.post(p).send().await.assert_status(StatusCode::NOT_FOUND);
+        }
+        c.get("/healthz").send().await.assert_status_is_ok();
+    }
+
+    #[tokio::test]
+    async fn connect_flow() {
+        let st = state().await;
+        let token = st.auth.create_session("admin@example.com");
+        let c = TestClient::new(build_routes(st));
+        let auth = format!("Bearer {token}");
+
+        // 認証なし 401
+        c.post("/open_redmine.v1.Projects/Create").body_json(&serde_json::json!({"name":"p"})).send().await.assert_status(StatusCode::UNAUTHORIZED);
+        // content-typeがJSONでない 415
+        c.post("/open_redmine.v1.Projects/List").content_type("text/plain").body("x").send().await.assert_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // 未知のメソッド 404
+        c.post("/open_redmine.v1.Projects/Nope").body_json(&serde_json::json!({})).send().await.assert_status(StatusCode::NOT_FOUND);
+        // GETは使えない 405/404
+        let g = c.get("/open_redmine.v1.Projects/List").send().await;
+        assert!(g.0.status().as_u16() >= 400);
+        // 不正JSON 400 / 重複キー 400 / idなし 400
+        c.post("/open_redmine.v1.Projects/Create").header("Authorization", &auth).content_type("application/json").body("{bad").send().await.assert_status(StatusCode::BAD_REQUEST);
+        c.post("/open_redmine.v1.Projects/Create").header("Authorization", &auth).content_type("application/json").body(r#"{"name":"a","name":"b"}"#).send().await.assert_status(StatusCode::BAD_REQUEST);
+        c.post("/open_redmine.v1.Projects/Get").header("Authorization", &auth).body_json(&serde_json::json!({})).send().await.assert_status(StatusCode::BAD_REQUEST);
+
+        // 正常: 作成(旧201→Connectは200)
+        let r = c.post("/open_redmine.v1.Projects/Create").header("Authorization", &auth).body_json(&serde_json::json!({"name":"conn-proj"})).send().await;
+        r.assert_status_is_ok();
+        let pid = r.json().await.value().object().get("id").i64();
+        let r = c.post("/open_redmine.v1.Tickets/Create").header("Authorization", &auth).body_json(&serde_json::json!({"project_id":pid,"title":"t1","description":"d"})).send().await;
+        r.assert_status_is_ok();
+        let tid = r.json().await.value().object().get("id").i64();
+        // 絞り込み(クエリ)つき一覧
+        let r = c.post("/open_redmine.v1.Tickets/List").header("Authorization", &auth).body_json(&serde_json::json!({"status":"open","project_id":pid})).send().await;
+        r.assert_status_is_ok();
+        assert_eq!(r.json().await.value().array().len(), 1);
+        // 更新・コメント
+        c.post("/open_redmine.v1.Tickets/Update").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid,"status":"closed"})).send().await.assert_status_is_ok();
+        c.post("/open_redmine.v1.Comments/Create").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid,"body":"hi"})).send().await.assert_status_is_ok();
+        c.post("/open_redmine.v1.Comments/List").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid})).send().await.assert_status_is_ok();
+        // 存在しない = 404 を {"code","message"} で
+        let r = c.post("/open_redmine.v1.Tickets/Get").header("Authorization", &auth).body_json(&serde_json::json!({"id":999999})).send().await;
+        r.assert_status(StatusCode::NOT_FOUND);
+        let v = r.json().await;
+        assert_eq!(v.value().object().get("code").string(), "not_found");
+
+        // 添付: base64で往復
+        let r = c.post("/open_redmine.v1.Attachments/Create").header("Authorization", &auth)
+            .body_json(&serde_json::json!({"id":tid,"file_name":"a.txt","content_type":"text/plain","data_base64":"aGVsbG8="})).send().await;
+        r.assert_status_is_ok();
+        let aid = r.json().await.value().object().get("id").i64();
+        let r = c.post("/open_redmine.v1.Attachments/Download").header("Authorization", &auth).body_json(&serde_json::json!({"id":aid})).send().await;
+        r.assert_status_is_ok();
+        let v = r.json().await;
+        assert_eq!(v.value().object().get("data_base64").string(), "aGVsbG8=");
+        assert_eq!(v.value().object().get("file_name").string(), "a.txt");
+        c.post("/open_redmine.v1.Attachments/Delete").header("Authorization", &auth).body_json(&serde_json::json!({"id":aid})).send().await.assert_status_is_ok();
+        c.post("/open_redmine.v1.Projects/Delete").header("Authorization", &auth).body_json(&serde_json::json!({"id":pid})).send().await.assert_status_is_ok();
     }
 }

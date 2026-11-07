@@ -3,7 +3,7 @@
 
 /**
  * `web/index.html`の`onclick="delete_attachment(...)"`から直接呼べるよう
- * グローバル公開する。**正直な開示**: `DELETE /api/attachments/:id`は
+ * グローバル公開する。**正直な開示**: `Attachments/Delete`は
  * メタデータのみ削除する(`StorageBackend`に削除APIがまだ無いため、
  * 保存先の実ファイルは残り続ける——`src/attachments.rs`の既知の
  * 制約、`main.rs::delete_attachment`のコメントに明記済み)。
@@ -84,8 +84,8 @@ export interface InitOutput {
     readonly delete_attachment: (a: number) => void;
     readonly delete_relation: (a: number) => void;
     readonly delete_time_entry: (a: number) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__h0420fbd9399d5376: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen__convert__closures_____invoke__he3fdcf35476492a1: (a: number, b: number) => void;
+    readonly wasm_bindgen_ca5fb045aed00025___convert__closures_____invoke___wasm_bindgen_ca5fb045aed00025___JsValue__core_ed718c3d60ebd546___result__Result_____wasm_bindgen_ca5fb045aed00025___JsError___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_ca5fb045aed00025___convert__closures_____invoke_______true_: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

@@ -20,7 +20,7 @@ const EMAIL_KEY: &str = "rsred_session_email";
 
 /// 2026-07-28追記(実バグ修正): このアプリは`easy-web.tokyo/open-redmine`
 /// (open-web-serverの「分身の術」テナントルーティング、`path_prefix`剥がし
-/// 転送)配下にマウントされているが、`api()`が絶対パス`/api/...`で
+/// 転送)配下にマウントされているが、旧`api()`が絶対パス`/api/...`で
 /// `fetch()`していたため、ブラウザは常にオリジン直下(`easy-web.tokyo/
 /// api/...`)を叩いてしまい、OTP送信を含む全APIリクエストが実際には
 /// 到達不能だった(実クリック操作で`POST https://easy-web.tokyo/api/
@@ -114,7 +114,7 @@ fn session_token() -> Option<String> {
     local_storage().get_item(SESSION_KEY).ok().flatten()
 }
 
-/// このサーバーが実際にログインを要求するか(`GET /api/auth/config`)を
+/// このサーバーが実際にログインを要求するか(`Auth/Config`)を
 /// 起動時に確認し、`require_auth: false`(デモ環境)ならログインパネルを
 /// 一切出さず、最初からログイン済み扱いにする(2026-09-07新設、
 /// ユーザー報告「デモ環境でログインを要求されるのはおかしい」への対応)。
@@ -129,7 +129,7 @@ fn session_token() -> Option<String> {
 /// `Some`を返すようにすることで、既存の「ログイン済みならAPIヘッダへ
 /// トークンを付ける」既存ロジックとも自然に噛み合わせる。
 async fn probe_auth_requirement() {
-    let Ok((200, text)) = api("GET", "/api/auth/config", None).await else { return };
+    let Ok((200, text)) = rpc("Auth/Config", None, None).await else { return };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return };
     let require_auth = value.get("require_auth").and_then(|v| v.as_bool()).unwrap_or(true);
     if !require_auth {
@@ -172,9 +172,32 @@ fn current_ticket_id() -> Option<u64> {
 
 /// `fetch()`の薄いラッパー。`Authorization: Bearer`はセッションがあれば
 /// 自動付与する。戻り値は`(status, body_text)`。
-async fn api(method: &str, path: &str, body: Option<String>) -> Result<(u16, String), JsValue> {
+/// Connect(単純呼び出し)クライアント: `POST /open_redmine.v1.<Service>/<Method>`。
+/// `id`は対象リソースのid(サーバー側`connect.rs`参照)、`body`はJSONオブジェクト文字列。
+/// 成功は常にHTTP 200。失敗時は`{"code","message"}`から`message`だけを返す。
+async fn rpc(name: &str, id: Option<u64>, body: Option<String>) -> Result<(u16, String), JsValue> {
+    let body = match (id, body) {
+        (Some(id), Some(b)) if b.trim() != "{}" && b.trim_start().starts_with('{') => format!("{{\"id\":{id},{}", &b.trim_start()[1..]),
+        (Some(id), _) => format!("{{\"id\":{id}}}"),
+        (None, Some(b)) => b,
+        (None, None) => "{}".to_string(),
+    };
+    let (status, text) = connect_post(&format!("/open_redmine.v1.{}", name), &body).await?;
+    if status == 200 {
+        return Ok((status, text));
+    }
+    let message = js_sys::JSON::parse(&text)
+        .ok()
+        .and_then(|v| js_sys::Reflect::get(&v, &JsValue::from_str("message")).ok())
+        .and_then(|m| m.as_string())
+        .unwrap_or(text);
+    Ok((status, message))
+}
+
+async fn connect_post(path: &str, body: &str) -> Result<(u16, String), JsValue> {
     let mut opts = RequestInit::new();
-    opts.set_method(method);
+    opts.set_method("POST");
+    let body = Some(body.to_string());
     opts.set_mode(RequestMode::SameOrigin);
     if let Some(b) = &body {
         opts.set_body(&JsValue::from_str(b));
@@ -480,7 +503,7 @@ fn wire_login() {
         wasm_bindgen_futures::spawn_local(async {
             let email = input_value("login-email");
             let body = serde_json::json!({ "email": email }).to_string();
-            match api("POST", "/api/auth/request-otp", Some(body)).await {
+            match rpc("Auth/RequestOtp", None, Some(body)).await {
                 Ok((200, _)) => set_text("login-status", "Code sent, please enter it below (OTPを送信しました。メールのコードを入力してください)。"),
                 Ok((503, _)) => set_text("login-status", "SMTP not configured, cannot send OTP (SMTP未設定のため、このサーバーではOTP送信できません)。"),
                 Ok((status, msg)) => set_text("login-status", &format!("Error (エラー) ({status}): {msg}")),
@@ -494,7 +517,7 @@ fn wire_login() {
             let email = input_value("login-email");
             let code = input_value("login-code");
             let body = serde_json::json!({ "email": email, "code": code }).to_string();
-            match api("POST", "/api/auth/verify-otp", Some(body)).await {
+            match rpc("Auth/VerifyOtp", None, Some(body)).await {
                 Ok((200, text)) => {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                         if let Some(token) = value.get("token").and_then(|v| v.as_str()) {
@@ -515,7 +538,7 @@ fn wire_login() {
 
     add_click("logout-btn", || {
         wasm_bindgen_futures::spawn_local(async {
-            let _ = api("POST", "/api/auth/logout", None).await;
+            let _ = rpc("Auth/Logout", None, None).await;
             let storage = local_storage();
             let _ = storage.remove_item(SESSION_KEY);
             let _ = storage.remove_item(EMAIL_KEY);
@@ -547,7 +570,7 @@ fn wire_project_form() {
                 }
             }
             let body = body_json.to_string();
-            if let Ok((201, _)) = api("POST", "/api/projects", Some(body)).await {
+            if let Ok((200, _)) = rpc("Projects/Create", None, Some(body)).await {
                 set_input_value("new-project-name", "");
                 set_input_value("new-project-categories", "");
                 set_input_value("new-project-custom-fields", "");
@@ -599,8 +622,8 @@ fn wire_ticket_form() {
                 body_json["done_ratio"] = serde_json::Value::from(ratio);
             }
             let body = body_json.to_string();
-            match api("POST", "/api/tickets", Some(body)).await {
-                Ok((201, _)) => {
+            match rpc("Tickets/Create", None, Some(body)).await {
+                Ok((200, _)) => {
                     set_text("ticket-status", "");
                     set_input_value("new-ticket-title", "");
                     set_textarea_value("new-ticket-description", "");
@@ -626,7 +649,7 @@ fn wire_ticket_detail() {
             };
             let status = select_value("ticket-status-select");
             let body = serde_json::json!({ "status": status }).to_string();
-            match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
+            match rpc("Tickets/Update", Some(ticket_id), Some(body)).await {
                 Ok((200, _)) => open_ticket(ticket_id as u32),
                 Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("Update error (更新エラー) ({status_code}): {msg}")),
                 Err(_) => set_text("ticket-detail-status", "Network error occurred (通信エラーが発生しました)。"),
@@ -644,7 +667,7 @@ fn wire_ticket_detail() {
                 return;
             }
             let body = serde_json::json!({ "assignee": assignee }).to_string();
-            match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
+            match rpc("Tickets/Update", Some(ticket_id), Some(body)).await {
                 Ok((200, _)) => {
                     set_input_value("new-assignee-input", "");
                     open_ticket(ticket_id as u32);
@@ -678,7 +701,7 @@ fn wire_ticket_detail() {
                 body_json["priority"] = serde_json::Value::String(priority);
             }
             let body = body_json.to_string();
-            match api("PUT", &format!("/api/tickets/{ticket_id}"), Some(body)).await {
+            match rpc("Tickets/Update", Some(ticket_id), Some(body)).await {
                 Ok((200, _)) => open_ticket(ticket_id as u32),
                 Ok((status_code, msg)) => set_text("ticket-detail-status", &format!("Schedule update error (予定・進捗更新エラー) ({status_code}): {msg}")),
                 Err(_) => set_text("ticket-detail-status", "Network error occurred (通信エラーが発生しました)。"),
@@ -696,8 +719,8 @@ fn wire_ticket_detail() {
                 return;
             }
             let body = serde_json::json!({ "body": comment_body }).to_string();
-            match api("POST", &format!("/api/tickets/{ticket_id}/comments"), Some(body)).await {
-                Ok((201, _)) => {
+            match rpc("Comments/Create", Some(ticket_id), Some(body)).await {
+                Ok((200, _)) => {
                     set_textarea_value("new-comment-body", "");
                     load_comments(ticket_id).await;
                 }
@@ -721,8 +744,8 @@ fn wire_ticket_detail() {
             };
             let kind = select_value("new-relation-kind");
             let body = serde_json::json!({ "to_ticket_id": target, "kind": kind }).to_string();
-            match api("POST", &format!("/api/tickets/{ticket_id}/relations"), Some(body)).await {
-                Ok((201, _)) => {
+            match rpc("Relations/Create", Some(ticket_id), Some(body)).await {
+                Ok((200, _)) => {
                     set_text("relation-status", "");
                     set_input_value("new-relation-target", "");
                     load_relations(ticket_id).await;
@@ -753,8 +776,8 @@ fn wire_ticket_detail() {
                 return;
             }
             let body = serde_json::json!({ "hours": hours, "activity": activity, "spent_on": spent_on, "comments": comments }).to_string();
-            match api("POST", &format!("/api/tickets/{ticket_id}/time_entries"), Some(body)).await {
-                Ok((201, _)) => {
+            match rpc("TimeEntries/Create", Some(ticket_id), Some(body)).await {
+                Ok((200, _)) => {
                     set_text("time-entry-status", "");
                     set_input_value("new-time-entry-hours", "");
                     set_input_value("new-time-entry-activity", "");
@@ -813,8 +836,8 @@ fn wire_wiki() {
                 return;
             }
             let body = serde_json::json!({ "slug": slug, "title": title, "body": body_text }).to_string();
-            match api("POST", &format!("/api/projects/{project_id}/wiki"), Some(body)).await {
-                Ok((201, _)) => {
+            match rpc("Wiki/Create", Some(project_id), Some(body)).await {
+                Ok((200, _)) => {
                     set_input_value("new-wiki-slug", "");
                     set_input_value("new-wiki-title", "");
                     set_textarea_value("new-wiki-body", "");
@@ -828,7 +851,7 @@ fn wire_wiki() {
 }
 
 async fn load_projects() {
-    let Ok((200, text)) = api("GET", "/api/projects", None).await else {
+    let Ok((200, text)) = rpc("Projects/List", None, None).await else {
         return;
     };
     let Ok(projects) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
@@ -879,12 +902,12 @@ pub fn select_project(project_id: u32) {
     });
 }
 
-/// 選択中プロジェクトの`GET /api/projects/:id/github/commits`を呼び、
+/// 選択中プロジェクトの`Projects/ListGithubCommits`を呼び、
 /// 直近コミット一覧を`#github-commit-list`へ描画する(2026-07-31追加)。
 /// `github_repo`未設定(`404`)の場合はその旨を表示し、エラーにはしない
 /// (連携は任意設定のため)。
 async fn load_github_commits(project_id: u64) {
-    match api("GET", &format!("/api/projects/{project_id}/github/commits"), None).await {
+    match rpc("Projects/ListGithubCommits", Some(project_id), None).await {
         Ok((200, text)) => {
             let Ok(commits) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
                 set_html("github-commit-list", "<li>Failed to parse commits (コミット一覧の解析に失敗しました)</li>");
@@ -937,7 +960,7 @@ fn on_refresh_github_commits() {
 /// カテゴリ定義が無い場合は「(none / なし)」のみの選択肢に戻す。
 async fn load_project_categories(project_id: u64) {
     let empty_html = "<option value=\"\">(none / なし)</option>".to_string();
-    let Ok((200, text)) = api("GET", &format!("/api/projects/{project_id}"), None).await else {
+    let Ok((200, text)) = rpc("Projects/Get", Some(project_id), None).await else {
         set_html("new-ticket-category", &empty_html);
         return;
     };
@@ -956,7 +979,7 @@ async fn load_project_categories(project_id: u64) {
 }
 
 async fn load_tickets(project_id: u64) {
-    let Ok((200, text)) = api("GET", "/api/tickets", None).await else {
+    let Ok((200, text)) = rpc("Tickets/List", None, None).await else {
         set_html("ticket-list", "<li>Failed to load (読み込みに失敗しました)</li>");
         return;
     };
@@ -1033,7 +1056,7 @@ pub fn open_ticket(ticket_id: u32) {
     let ticket_id = ticket_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
         set_input_value("selected-ticket-id", &ticket_id.to_string());
-        let Ok((200, text)) = api("GET", &format!("/api/tickets/{ticket_id}"), None).await else {
+        let Ok((200, text)) = rpc("Tickets/Get", Some(ticket_id), None).await else {
             return;
         };
         let Ok(t) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -1078,7 +1101,7 @@ pub fn open_ticket(ticket_id: u32) {
 }
 
 async fn load_relations(ticket_id: u64) {
-    let Ok((200, text)) = api("GET", &format!("/api/tickets/{ticket_id}/relations"), None).await else {
+    let Ok((200, text)) = rpc("Relations/List", Some(ticket_id), None).await else {
         return;
     };
     let Ok(relations) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
@@ -1110,7 +1133,7 @@ async fn load_relations(ticket_id: u64) {
 pub fn delete_relation(relation_id: u32) {
     let relation_id = relation_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
-        match api("DELETE", &format!("/api/relations/{relation_id}"), None).await {
+        match rpc("Relations/Delete", Some(relation_id), None).await {
             Ok((200, _)) => {
                 if let Some(ticket_id) = current_ticket_id() {
                     load_relations(ticket_id).await;
@@ -1123,7 +1146,7 @@ pub fn delete_relation(relation_id: u32) {
 }
 
 async fn load_time_entries(ticket_id: u64) {
-    let Ok((200, text)) = api("GET", &format!("/api/tickets/{ticket_id}/time_entries"), None).await else {
+    let Ok((200, text)) = rpc("TimeEntries/List", Some(ticket_id), None).await else {
         return;
     };
     let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
@@ -1170,7 +1193,7 @@ async fn load_time_entries(ticket_id: u64) {
 pub fn delete_time_entry(entry_id: u32) {
     let entry_id = entry_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
-        match api("DELETE", &format!("/api/time_entries/{entry_id}"), None).await {
+        match rpc("TimeEntries/Delete", Some(entry_id), None).await {
             Ok((200, _)) => {
                 if let Some(ticket_id) = current_ticket_id() {
                     load_time_entries(ticket_id).await;
@@ -1184,10 +1207,10 @@ pub fn delete_time_entry(entry_id: u32) {
 
 /// 添付ファイル一覧を取得し描画する。削除ボタンの表示可否は
 /// `load_time_entries`と同じ「投稿者本人のみ表示」パターンを踏襲する
-/// (表示上の補助にすぎず、最終防衛は`DELETE /api/attachments/:id`の
+/// (表示上の補助にすぎず、最終防衛は`Attachments/Delete`の
 /// サーバー側権限チェック)。
 async fn load_attachments(ticket_id: u64) {
-    let Ok((200, text)) = api("GET", &format!("/api/tickets/{ticket_id}/attachments"), None).await else {
+    let Ok((200, text)) = rpc("Attachments/List", Some(ticket_id), None).await else {
         return;
     };
     let Ok(attachments) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
@@ -1217,7 +1240,7 @@ async fn load_attachments(ticket_id: u64) {
 }
 
 /// `new-attachment-file`(`<input type="file">`)の選択内容を
-/// `multipart/form-data`で`POST /api/tickets/:id/attachments`へ送信する。
+/// `Attachments/Create`(Connect、base64)へ送信する。
 /// `api()`(JSON専用)は使わず、`FormData`+生の`fetch()`を直接組み立てる
 /// (`Content-Type`はブラウザが`boundary`付きで自動設定するため、
 /// `api()`のようにJSON用ヘッダを明示的に設定してはいけない)。
@@ -1234,26 +1257,27 @@ async fn upload_attachment(ticket_id: u64) -> Result<bool, JsValue> {
     let Some(file) = files.get(0) else {
         return Ok(false);
     };
-    let form_data = web_sys::FormData::new()?;
-    form_data.append_with_blob("file", &file)?;
-
-    let mut opts = RequestInit::new();
-    opts.set_method("POST");
-    opts.set_mode(RequestMode::SameOrigin);
-    opts.set_body(&form_data);
-    let url = format!("{}/api/tickets/{ticket_id}/attachments", base_path());
-    let request = Request::new_with_str_and_init(&url, &opts)?;
-    if let Some(token) = session_token() {
-        request.headers().set("Authorization", &format!("Bearer {token}"))?;
+    // Connect(JSON)で送るため、ファイルをbase64にして `Attachments/Create` へ。
+    let buf = JsFuture::from(file.array_buffer()).await?;
+    let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+    let mut bin = String::with_capacity(bytes.len());
+    for chunk in bytes.chunks(0x8000) {
+        for b in chunk {
+            bin.push(*b as char);
+        }
     }
-    let resp_value = JsFuture::from(window().fetch_with_request(&request)).await?;
-    let resp: Response = resp_value.dyn_into()?;
-    let status = resp.status();
-    if status == 201 {
+    let data_base64 = window().btoa(&bin)?;
+    let body = serde_json::json!({
+        "file_name": file.name(),
+        "content_type": if file.type_().is_empty() { "application/octet-stream".to_string() } else { file.type_() },
+        "data_base64": data_base64,
+    })
+    .to_string();
+    let (status, text) = rpc("Attachments/Create", Some(ticket_id), Some(body)).await?;
+    if status == 200 {
         input.set_value("");
         Ok(true)
     } else {
-        let text = JsFuture::from(resp.text()?).await?.as_string().unwrap_or_default();
         set_text("attachment-status", &format!("Error (エラー) ({status}): {text}"));
         Ok(false)
     }
@@ -1278,29 +1302,21 @@ pub fn download_attachment(attachment_id: u32) {
 }
 
 async fn download_attachment_inner(attachment_id: u64) -> Result<(), JsValue> {
-    let mut opts = RequestInit::new();
-    opts.set_method("GET");
-    opts.set_mode(RequestMode::SameOrigin);
-    let url = format!("{}/api/attachments/{attachment_id}/download", base_path());
-    let request = Request::new_with_str_and_init(&url, &opts)?;
-    if let Some(token) = session_token() {
-        request.headers().set("Authorization", &format!("Bearer {token}"))?;
-    }
-    let resp_value = JsFuture::from(window().fetch_with_request(&request)).await?;
-    let resp: Response = resp_value.dyn_into()?;
-    if resp.status() != 200 {
+    let (status, text) = rpc("Attachments/Download", Some(attachment_id), None).await?;
+    if status != 200 {
         return Err(JsValue::from_str("download failed"));
     }
-    let disposition = resp.headers().get("content-disposition").ok().flatten().unwrap_or_default();
-    let filename = disposition
-        .split("filename=\"")
-        .nth(1)
-        .and_then(|s| s.split('"').next())
-        .unwrap_or("download")
-        .to_string();
-
-    let blob_value = JsFuture::from(resp.blob()?).await?;
-    let blob: web_sys::Blob = blob_value.dyn_into()?;
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let filename = v["file_name"].as_str().unwrap_or("download").to_string();
+    let content_type = v["content_type"].as_str().unwrap_or("application/octet-stream").to_string();
+    let bin = window().atob(v["data_base64"].as_str().unwrap_or(""))?;
+    let bytes: Vec<u8> = bin.chars().map(|c| c as u32 as u8).collect();
+    let array = js_sys::Uint8Array::from(bytes.as_slice());
+    let parts = js_sys::Array::new();
+    parts.push(&array);
+    let bag = web_sys::BlobPropertyBag::new();
+    bag.set_type(&content_type);
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)?;
     let object_url = web_sys::Url::create_object_url_with_blob(&blob)?;
     let anchor = document().create_element("a")?;
     anchor.set_attribute("href", &object_url)?;
@@ -1313,7 +1329,7 @@ async fn download_attachment_inner(attachment_id: u64) -> Result<(), JsValue> {
 }
 
 /// `web/index.html`の`onclick="delete_attachment(...)"`から直接呼べるよう
-/// グローバル公開する。**正直な開示**: `DELETE /api/attachments/:id`は
+/// グローバル公開する。**正直な開示**: `Attachments/Delete`は
 /// メタデータのみ削除する(`StorageBackend`に削除APIがまだ無いため、
 /// 保存先の実ファイルは残り続ける——`src/attachments.rs`の既知の
 /// 制約、`main.rs::delete_attachment`のコメントに明記済み)。
@@ -1323,7 +1339,7 @@ async fn download_attachment_inner(attachment_id: u64) -> Result<(), JsValue> {
 pub fn delete_attachment(attachment_id: u32) {
     let attachment_id = attachment_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
-        match api("DELETE", &format!("/api/attachments/{attachment_id}"), None).await {
+        match rpc("Attachments/Delete", Some(attachment_id), None).await {
             Ok((200, _)) => {
                 if let Some(ticket_id) = current_ticket_id() {
                     load_attachments(ticket_id).await;
@@ -1336,7 +1352,7 @@ pub fn delete_attachment(attachment_id: u32) {
 }
 
 async fn load_comments(ticket_id: u64) {
-    let Ok((200, text)) = api("GET", &format!("/api/tickets/{ticket_id}/comments"), None).await else {
+    let Ok((200, text)) = rpc("Comments/List", Some(ticket_id), None).await else {
         return;
     };
     let Ok(comments) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
@@ -1355,7 +1371,7 @@ async fn load_comments(ticket_id: u64) {
 }
 
 async fn load_wiki_pages(project_id: u64) {
-    let Ok((200, text)) = api("GET", &format!("/api/projects/{project_id}/wiki"), None).await else {
+    let Ok((200, text)) = rpc("Wiki/List", Some(project_id), None).await else {
         set_text("wiki-status", "Failed to load wiki list (Wiki一覧の読み込みに失敗しました)。");
         return;
     };
@@ -1381,7 +1397,7 @@ async fn load_wiki_pages(project_id: u64) {
 pub fn open_wiki_page(page_id: u32) {
     let page_id = page_id as u64;
     wasm_bindgen_futures::spawn_local(async move {
-        let Ok((200, text)) = api("GET", &format!("/api/wiki/{page_id}"), None).await else {
+        let Ok((200, text)) = rpc("Wiki/Get", Some(page_id), None).await else {
             return;
         };
         let Ok(page) = serde_json::from_str::<serde_json::Value>(&text) else {

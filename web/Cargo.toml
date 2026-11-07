@@ -45,4 +45,5 @@ features = [
     "FileList",
     "Url",
     "Blob",
+    "BlobPropertyBag",
 ]

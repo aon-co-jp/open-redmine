@@ -1,3 +1,6 @@
+> **注意(2026-11-07)**: このガイド中の `/api/...` は廃止済みのREST表記です。現在の公開APIは Connect (`POST /open_redmine.v1.<Service>/<Method>`)。対応表は README.md を参照。
+> **Note**: the `/api/...` routes below are removed; use Connect `POST /open_redmine.v1.<Service>/<Method>` (see README.md).
+
 # open-redmine Rust APIクライアント利用マニュアル
 
 open-redmineは素のJSON over HTTP APIとして実装されており、専用のRustクレート
