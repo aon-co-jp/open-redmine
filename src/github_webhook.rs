@@ -17,7 +17,7 @@
 
 use crate::github::{parse_referenced_ticket_ids, GithubCommit};
 use crate::storage::StorageBackend;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 use std::collections::HashMap;
