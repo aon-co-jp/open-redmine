@@ -278,3 +278,7 @@ Deployed `6612f6b` (REST removed, Connect) to the VPS on 2026-11-08: built in WS
 **Paste-ready message (English)**
 > Continue `aon-co-jp/open-redmine`. The REST abolition (Connect, `POST /open_redmine.v1.<Service>/<Method>`) is done and on main; production got `6612f6b` on 2026-11-08. First read the resume message in `CLAUDE.md` and `PORTING.md`. To do: (1) check whether the dependency-update commits (`13773b7`, `3551712`) are live in production; if not, build in WSL, verify glibc <= 2.39, scp, back up, swap, restart `open-redmine` (8100) and `open-redmine-demo` (8113), verify (roll back on failure); (2) exercise login-then-use flows in a browser; (3) ask the version-control session to register the exceptions in `exceptions.toml`. Do not touch the uncommitted changes in `F:\runo\repository\open-redmine`; use a fresh clone. Never build on the VPS. Keep secrets out of screens and commits. Chat in Japanese only.
 
+
+## 2026-11-20 依存の脆弱性修正 / Dependency security fix
+**日本語**: lettre 0.11.24(RUSTSEC-2026-0560〜0565) を更新し、`cargo test --locked` が全件成功しました(本番反映は別途)。
+**English**: Updated lettre 0.11.24(RUSTSEC-2026-0560〜0565); `cargo test --locked` passes (production deploy is separate).
