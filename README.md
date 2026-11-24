@@ -1,3 +1,5 @@
+> Latest translations / 翻訳の最新版: [0-LATEST-TRANSLATIONS.md](0-LATEST-TRANSLATIONS.md)
+
 # open-redmine
 
 (旧名`RS-Chiketto`→2026-07-22に`RS-Red`→2026-07-27に`open-redmine`へ改名)
