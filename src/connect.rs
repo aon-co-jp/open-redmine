@@ -1,6 +1,6 @@
 //! Connect(単純呼び出し)層 — REST全廃方針(2026-11-04)の公開API面。
 //!
-//! 公開する経路は `POST /open_redmine.v1.<Service>/<Method>`
+//! 公開する経路は `POST /open_redmine.<Service>/<Method>`
 //! (`content-type: application/json`、本文はJSONオブジェクト)のみ。
 //! 認証は従来どおり `Authorization: Bearer <token>`。成功は常にHTTP 200
 //! (本文JSON)、失敗は `{"code","message"}` とHTTPステータス。
@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 pub type Shared = Arc<poem::endpoint::BoxEndpoint<'static, Response>>;
 
-pub const PACKAGE: &str = "open_redmine.v1";
+pub const PACKAGE: &str = "open_redmine";
 /// 一般の呼び出しの本文上限。
 const MAX_BODY: usize = 256 * 1024;
 /// 添付アップロード(base64込み)の本文上限。
@@ -87,7 +87,7 @@ const TABLE: &[Rpc] = &[
     rpc("SavedQueries", "Run", "GET", "/api/saved_queries/{id}/run", false),
 ];
 
-/// 公開するConnect経路の一覧(`/open_redmine.v1.Tickets/List` の形)。
+/// 公開するConnect経路の一覧(`/open_redmine.Tickets/List` の形)。
 pub fn paths() -> Vec<String> {
     TABLE.iter().map(|r| format!("/{PACKAGE}.{}/{}", r.service, r.method)).collect()
 }
@@ -219,7 +219,7 @@ async fn handle(inner: Shared, req: Request) -> Response {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD;
 
-    // /open_redmine.v1.Service/Method
+    // /open_redmine.Service/Method
     let path = req.uri().path().trim_start_matches('/').to_string();
     let Some((svc_full, method)) = path.split_once('/') else {
         return error(StatusCode::NOT_FOUND, "unknown method");

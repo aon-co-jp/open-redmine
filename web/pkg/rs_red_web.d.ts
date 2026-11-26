@@ -84,8 +84,8 @@ export interface InitOutput {
     readonly delete_attachment: (a: number) => void;
     readonly delete_relation: (a: number) => void;
     readonly delete_time_entry: (a: number) => void;
-    readonly wasm_bindgen_ca5fb045aed00025___convert__closures_____invoke___wasm_bindgen_ca5fb045aed00025___JsValue__core_ed718c3d60ebd546___result__Result_____wasm_bindgen_ca5fb045aed00025___JsError___true_: (a: number, b: number, c: any) => [number, number];
-    readonly wasm_bindgen_ca5fb045aed00025___convert__closures_____invoke_______true_: (a: number, b: number) => void;
+    readonly wasm_bindgen_556296f3a905d08e___convert__closures_____invoke___wasm_bindgen_556296f3a905d08e___JsValue__core_d941ad8722425d2e___result__Result_____wasm_bindgen_556296f3a905d08e___JsError___true_: (a: number, b: number, c: any) => [number, number];
+    readonly wasm_bindgen_556296f3a905d08e___convert__closures_____invoke_______true_: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

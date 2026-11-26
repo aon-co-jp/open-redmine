@@ -172,7 +172,7 @@ fn current_ticket_id() -> Option<u64> {
 
 /// `fetch()`の薄いラッパー。`Authorization: Bearer`はセッションがあれば
 /// 自動付与する。戻り値は`(status, body_text)`。
-/// Connect(単純呼び出し)クライアント: `POST /open_redmine.v1.<Service>/<Method>`。
+/// Connect(単純呼び出し)クライアント: `POST /open_redmine.<Service>/<Method>`。
 /// `id`は対象リソースのid(サーバー側`connect.rs`参照)、`body`はJSONオブジェクト文字列。
 /// 成功は常にHTTP 200。失敗時は`{"code","message"}`から`message`だけを返す。
 async fn rpc(name: &str, id: Option<u64>, body: Option<String>) -> Result<(u16, String), JsValue> {
@@ -182,7 +182,7 @@ async fn rpc(name: &str, id: Option<u64>, body: Option<String>) -> Result<(u16, 
         (None, Some(b)) => b,
         (None, None) => "{}".to_string(),
     };
-    let (status, text) = connect_post(&format!("/open_redmine.v1.{}", name), &body).await?;
+    let (status, text) = connect_post(&format!("/open_redmine.{}", name), &body).await?;
     if status == 200 {
         return Ok((status, text));
     }

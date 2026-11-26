@@ -2018,7 +2018,7 @@ fn build_internal(state: AppState) -> impl poem::Endpoint {
 }
 
 /// 公開ルーター。REST全廃(2026-11-04方針)により、公開するAPIは
-/// Connect(`POST /open_redmine.v1.<Service>/<Method>`)のみ。
+/// Connect(`POST /open_redmine.<Service>/<Method>`)のみ。
 /// 例外(相手の規格が形を決めるもの): 画面・静的ファイル・ヘルスチェック・
 /// GitHub Webhook(`X-Hub-Signature-256`署名検証)。
 fn build_routes(state: AppState) -> impl poem::Endpoint {
@@ -3912,51 +3912,54 @@ mod connect_tests {
         let auth = format!("Bearer {token}");
 
         // 認証なし 401
-        c.post("/open_redmine.v1.Projects/Create").body_json(&serde_json::json!({"name":"p"})).send().await.assert_status(StatusCode::UNAUTHORIZED);
+        c.post("/open_redmine.Projects/Create").body_json(&serde_json::json!({"name":"p"})).send().await.assert_status(StatusCode::UNAUTHORIZED);
         // content-typeがJSONでない 415
-        c.post("/open_redmine.v1.Projects/List").content_type("text/plain").body("x").send().await.assert_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        c.post("/open_redmine.Projects/List").content_type("text/plain").body("x").send().await.assert_status(StatusCode::UNSUPPORTED_MEDIA_TYPE);
         // 未知のメソッド 404
-        c.post("/open_redmine.v1.Projects/Nope").body_json(&serde_json::json!({})).send().await.assert_status(StatusCode::NOT_FOUND);
+        c.post("/open_redmine.Projects/Nope").body_json(&serde_json::json!({})).send().await.assert_status(StatusCode::NOT_FOUND);
+        // 旧 .v1 経路は削除済み 404(認証つきでも)
+        c.post("/open_redmine.v1.Projects/List").header("Authorization", &auth).body_json(&serde_json::json!({})).send().await.assert_status(StatusCode::NOT_FOUND);
+        c.post("/open_redmine.v1.Tickets/Create").body_json(&serde_json::json!({})).send().await.assert_status(StatusCode::NOT_FOUND);
         // GETは使えない 405/404
-        let g = c.get("/open_redmine.v1.Projects/List").send().await;
+        let g = c.get("/open_redmine.Projects/List").send().await;
         assert!(g.0.status().as_u16() >= 400);
         // 不正JSON 400 / 重複キー 400 / idなし 400
-        c.post("/open_redmine.v1.Projects/Create").header("Authorization", &auth).content_type("application/json").body("{bad").send().await.assert_status(StatusCode::BAD_REQUEST);
-        c.post("/open_redmine.v1.Projects/Create").header("Authorization", &auth).content_type("application/json").body(r#"{"name":"a","name":"b"}"#).send().await.assert_status(StatusCode::BAD_REQUEST);
-        c.post("/open_redmine.v1.Projects/Get").header("Authorization", &auth).body_json(&serde_json::json!({})).send().await.assert_status(StatusCode::BAD_REQUEST);
+        c.post("/open_redmine.Projects/Create").header("Authorization", &auth).content_type("application/json").body("{bad").send().await.assert_status(StatusCode::BAD_REQUEST);
+        c.post("/open_redmine.Projects/Create").header("Authorization", &auth).content_type("application/json").body(r#"{"name":"a","name":"b"}"#).send().await.assert_status(StatusCode::BAD_REQUEST);
+        c.post("/open_redmine.Projects/Get").header("Authorization", &auth).body_json(&serde_json::json!({})).send().await.assert_status(StatusCode::BAD_REQUEST);
 
         // 正常: 作成(旧201→Connectは200)
-        let r = c.post("/open_redmine.v1.Projects/Create").header("Authorization", &auth).body_json(&serde_json::json!({"name":"conn-proj"})).send().await;
+        let r = c.post("/open_redmine.Projects/Create").header("Authorization", &auth).body_json(&serde_json::json!({"name":"conn-proj"})).send().await;
         r.assert_status_is_ok();
         let pid = r.json().await.value().object().get("id").i64();
-        let r = c.post("/open_redmine.v1.Tickets/Create").header("Authorization", &auth).body_json(&serde_json::json!({"project_id":pid,"title":"t1","description":"d"})).send().await;
+        let r = c.post("/open_redmine.Tickets/Create").header("Authorization", &auth).body_json(&serde_json::json!({"project_id":pid,"title":"t1","description":"d"})).send().await;
         r.assert_status_is_ok();
         let tid = r.json().await.value().object().get("id").i64();
         // 絞り込み(クエリ)つき一覧
-        let r = c.post("/open_redmine.v1.Tickets/List").header("Authorization", &auth).body_json(&serde_json::json!({"status":"open","project_id":pid})).send().await;
+        let r = c.post("/open_redmine.Tickets/List").header("Authorization", &auth).body_json(&serde_json::json!({"status":"open","project_id":pid})).send().await;
         r.assert_status_is_ok();
         assert_eq!(r.json().await.value().array().len(), 1);
         // 更新・コメント
-        c.post("/open_redmine.v1.Tickets/Update").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid,"status":"closed"})).send().await.assert_status_is_ok();
-        c.post("/open_redmine.v1.Comments/Create").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid,"body":"hi"})).send().await.assert_status_is_ok();
-        c.post("/open_redmine.v1.Comments/List").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid})).send().await.assert_status_is_ok();
+        c.post("/open_redmine.Tickets/Update").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid,"status":"closed"})).send().await.assert_status_is_ok();
+        c.post("/open_redmine.Comments/Create").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid,"body":"hi"})).send().await.assert_status_is_ok();
+        c.post("/open_redmine.Comments/List").header("Authorization", &auth).body_json(&serde_json::json!({"id":tid})).send().await.assert_status_is_ok();
         // 存在しない = 404 を {"code","message"} で
-        let r = c.post("/open_redmine.v1.Tickets/Get").header("Authorization", &auth).body_json(&serde_json::json!({"id":999999})).send().await;
+        let r = c.post("/open_redmine.Tickets/Get").header("Authorization", &auth).body_json(&serde_json::json!({"id":999999})).send().await;
         r.assert_status(StatusCode::NOT_FOUND);
         let v = r.json().await;
         assert_eq!(v.value().object().get("code").string(), "not_found");
 
         // 添付: base64で往復
-        let r = c.post("/open_redmine.v1.Attachments/Create").header("Authorization", &auth)
+        let r = c.post("/open_redmine.Attachments/Create").header("Authorization", &auth)
             .body_json(&serde_json::json!({"id":tid,"file_name":"a.txt","content_type":"text/plain","data_base64":"aGVsbG8="})).send().await;
         r.assert_status_is_ok();
         let aid = r.json().await.value().object().get("id").i64();
-        let r = c.post("/open_redmine.v1.Attachments/Download").header("Authorization", &auth).body_json(&serde_json::json!({"id":aid})).send().await;
+        let r = c.post("/open_redmine.Attachments/Download").header("Authorization", &auth).body_json(&serde_json::json!({"id":aid})).send().await;
         r.assert_status_is_ok();
         let v = r.json().await;
         assert_eq!(v.value().object().get("data_base64").string(), "aGVsbG8=");
         assert_eq!(v.value().object().get("file_name").string(), "a.txt");
-        c.post("/open_redmine.v1.Attachments/Delete").header("Authorization", &auth).body_json(&serde_json::json!({"id":aid})).send().await.assert_status_is_ok();
-        c.post("/open_redmine.v1.Projects/Delete").header("Authorization", &auth).body_json(&serde_json::json!({"id":pid})).send().await.assert_status_is_ok();
+        c.post("/open_redmine.Attachments/Delete").header("Authorization", &auth).body_json(&serde_json::json!({"id":aid})).send().await.assert_status_is_ok();
+        c.post("/open_redmine.Projects/Delete").header("Authorization", &auth).body_json(&serde_json::json!({"id":pid})).send().await.assert_status_is_ok();
     }
 }
